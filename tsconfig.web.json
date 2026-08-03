@@ -1,0 +1,10 @@
+{
+  "extends": "@electron-toolkit/tsconfig/tsconfig.web.json",
+  "include": ["src/**/*", "electron/preload/**/*", "electron/main/database/types.ts"],
+  "compilerOptions": {
+    "composite": false,
+    "paths": {
+      "@renderer/*": ["./src/*"]
+    }
+  }
+}

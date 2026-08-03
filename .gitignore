@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+
+# Build and packaging output
+dist/
+out/
+release/
+build/
+dist-electron/
+.electron-builder/
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+*.db.bak
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+log.txt
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.p12
+*.key
+
+# Tests and generated reports
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+impeccable-report.json
+
+# Local tools and scratch files
+.tmp/
+.agents/
+.claude/
+.continue/
+.trae/
+.codex-tmp/
+targetPic/
+tmp_check.mjs
+scripts/*
+!scripts/measure-cold-start.mjs
+!scripts/report-build-sizes.mjs
+
+# TypeScript and package-manager caches
+*.tsbuildinfo
+.pnpm-store/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.vs/
+*.suo
+*.user
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini

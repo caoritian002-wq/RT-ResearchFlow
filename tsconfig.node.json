@@ -1,0 +1,12 @@
+{
+  "extends": "@electron-toolkit/tsconfig/tsconfig.node.json",
+  "include": ["electron.vite.config.*", "research-access.vite.config.ts", "electron/**/*"],
+  "compilerOptions": {
+    "composite": false,
+    "types": ["electron-vite/node"],
+    "paths": {
+      "@main/*": ["./electron/main/*"],
+      "@preload/*": ["./electron/preload/*"]
+    }
+  }
+}
