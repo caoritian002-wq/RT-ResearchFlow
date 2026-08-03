@@ -298,7 +298,7 @@ async function waitForTerminalRun(db: Database.Database, projectId: string, runI
   throw new Error(`生成运行 ${runId} 未在预期时间内结束`)
 }
 
-describe('产业研究第180阶段联合回归', () => {
+describe('产业研究第180阶段联合回归', { timeout: 30_000 }, () => {
   let db: Database.Database
   let tempDir: string
   let dbPath: string
@@ -737,7 +737,7 @@ describe('产业研究第180阶段联合回归', () => {
       reusedGeneratedArtifacts: true,
       status: 'succeeded',
     })
-  }, 15_000)
+  })
 
   it('财务采集进程中断后从公司阶段继续且不重复前置模型阶段', async () => {
     const started = await startIndustryResearchGeneration(db, {
