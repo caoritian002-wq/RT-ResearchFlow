@@ -26,6 +26,8 @@ const config = {
   // postinstall rebuilds native modules once; packaging reuses that verified Electron ABI output.
   npmRebuild: false,
   win: {
+    icon: 'icon.ico',
+    artifactName: '${productName}-Setup-${version}-${arch}.${ext}',
     target: [{ target: 'nsis', arch: ['x64'] }]
   },
   nsis: {

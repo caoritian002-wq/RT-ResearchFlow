@@ -207,6 +207,36 @@ describe('research text audit', () => {
     expect(negated.checks.find((item) => item.code === 'PROHIBITED_TRANSACTION_INSTRUCTION')?.status).toBe('passed')
   })
 
+  it('不把否定卖出结论和交易动作研究描述误判为交易指令', () => {
+    const audit = auditResearchText({
+      text: [
+        '它可以证明历史止损事件发生过，不能单独证明当前仍应以52.43卖出，也不能证明当前趋势已经修复。',
+        '此时不必把技术信号自动升级为基本面卖出结论。',
+        '买入信号、卖出条件和历史减仓记录仍需分别核验。',
+      ].join('\n'),
+      documentKind: 'discussion',
+      evidenceContrast: stockContrast(),
+      now: 1,
+    })
+
+    expect(audit.checks.find((item) => item.code === 'PROHIBITED_TRANSACTION_INSTRUCTION')).toEqual(
+      expect.objectContaining({ status: 'passed', excerpts: [] }),
+    )
+  })
+
+  it('仍阻断明确动作指令、命令式动作和具体仓位', () => {
+    const audit = auditResearchText({
+      text: '非核心持仓建议在风险阈值触发后立即卖出；若继续走弱，减仓并将仓位控制在20%。',
+      documentKind: 'discussion',
+      evidenceContrast: stockContrast(),
+      now: 1,
+    })
+
+    expect(audit.checks.find((item) => item.code === 'PROHIBITED_TRANSACTION_INSTRUCTION')).toEqual(
+      expect.objectContaining({ status: 'blocked' }),
+    )
+  })
+
   it('对证据夸大、公告标题升级、未来事实和不可追溯精确数字留警告而不阻断', () => {
     const audit = auditResearchText({
       text: [

@@ -8,6 +8,7 @@ release/
 build/
 dist-electron/
 .electron-builder/
+electron.vite.config.*.mjs
 
 # Runtime data
 *.db

@@ -1,6 +1,6 @@
 {
   "name": "rt-research-flow",
-  "version": "1.0.0",
+  "version": "0.1.0-beta.1",
   "description": "RT-ResearchFlow - 本地优先的 A 股个人投研工作台",
   "main": "./out/main/index.js",
   "author": "",

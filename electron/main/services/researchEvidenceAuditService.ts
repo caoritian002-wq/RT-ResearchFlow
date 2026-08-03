@@ -984,13 +984,12 @@ function check(
 }
 
 function collectAffirmativeProhibitedExcerpts(text: string): string[] {
+  const excerpts = collectAffirmativeActionExcerpts(text)
   const patterns = [
-    /(?:建议|应当|应该|可以|可考虑|宜|需要|务必|立即|直接)?\s*(?:买入|卖出|加仓|减仓|清仓|建仓|满仓|抄底)/g,
     /(?:目标价|目标价格|止盈价|止损价)\s*(?:为|是|：|:|可设为|设在)?\s*[¥￥]?\d+(?:\.\d+)?/g,
     /(?:仓位|配置比例)\s*(?:为|控制在|设为|建议)?\s*\d+(?:\.\d+)?%/g,
     /(?:保证|确保).{0,10}(?:收益|盈利)|(?:稳赚|必涨|必跌|无风险收益)|(?:收益率).{0,10}(?:至少|不低于)\s*\d+(?:\.\d+)?%/g,
   ]
-  const excerpts: string[] = []
   for (const pattern of patterns) {
     for (const match of text.matchAll(pattern)) {
       const index = match.index ?? 0
@@ -1001,9 +1000,57 @@ function collectAffirmativeProhibitedExcerpts(text: string): string[] {
   return [...new Set(excerpts)].slice(0, MAX_AUDIT_EXCERPTS)
 }
 
+function collectAffirmativeActionExcerpts(text: string): string[] {
+  const excerpts: string[] = []
+  for (const match of text.matchAll(/(?:买入|卖出|加仓|减仓|清仓|建仓|满仓|抄底)/g)) {
+    const index = match.index ?? 0
+    if (isResearchActionMention(text, index + match[0].length)) continue
+    if (isNegated(text, index)) continue
+    if (!hasAffirmativeInstructionContext(text, index)) continue
+    excerpts.push(excerptAt(text, index, match[0].length))
+  }
+  return excerpts
+}
+
+function isResearchActionMention(text: string, actionEnd: number): boolean {
+  const suffix = text.slice(actionEnd, actionEnd + 20).replace(/^[\s*_`]+/, '')
+  return /^(?:结论|信号|条件|逻辑|依据|理由|行为|记录|历史|价格|成本|时点|口径|建议|指令|动作|风险|压力|意愿)/.test(suffix)
+}
+
+function hasAffirmativeInstructionContext(text: string, index: number): boolean {
+  const prefix = scopedClausePrefix(text, index, 64)
+  const normalized = prefix.replace(/[\s*_`]+/g, '')
+  if (/(?<![不无未])(?:建议|应当|应该|应|可以|可考虑|宜|需要|务必|立即|直接|请|须|必须)[^。！？；;，,\n]{0,16}$/.test(normalized)) {
+    return true
+  }
+
+  const commandLead = normalized
+    .replace(/^[>#-]+/, '')
+    .replace(/^\d+[.、)]/, '')
+  return /^(?:随后|然后|再|先|择机|逢高|逢低|立即|直接|请)?$/.test(commandLead)
+}
+
 function isNegated(text: string, index: number): boolean {
-  const prefix = text.slice(Math.max(0, index - 18), index)
-  return /(?:不|不得|不能|禁止|避免|无需|无须|未|并非|非|切勿|不应|不宜|不构成)[^。！？；;\n]{0,10}$/.test(prefix)
+  const prefix = scopedClausePrefix(text, index, 64).replace(/[\s*_`]+/g, '')
+  if (/(?:不能|无法|不足以|尚不能|未能)(?:单独|直接)?(?:证明|说明|支持|得出|确认|推导|判断|认定|作为)[^。！？；;，,\n]{0,32}$/.test(prefix)) {
+    return true
+  }
+  return /(?:不建议|不应该|不应当|不应|不宜|不必|不要|不得|不能|不可|禁止|避免|无需|无须|未建议|未要求|并非|而非|不是|切勿|不构成|别)[^。！？；;，,\n]{0,16}$/.test(prefix)
+}
+
+function scopedClausePrefix(text: string, index: number, limit: number): string {
+  const prefix = text.slice(Math.max(0, index - limit), index)
+  const boundary = Math.max(
+    prefix.lastIndexOf('。'),
+    prefix.lastIndexOf('！'),
+    prefix.lastIndexOf('？'),
+    prefix.lastIndexOf('；'),
+    prefix.lastIndexOf(';'),
+    prefix.lastIndexOf('，'),
+    prefix.lastIndexOf(','),
+    prefix.lastIndexOf('\n'),
+  )
+  return prefix.slice(boundary + 1)
 }
 
 function collectRegexExcerpts(text: string, pattern: RegExp): string[] {

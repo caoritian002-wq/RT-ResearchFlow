@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-release:
+    name: windows-release
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Validate release tag
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $package = Get-Content -Raw package.json | ConvertFrom-Json
+          $expectedTag = "v$($package.version)"
+          if ($env:RELEASE_TAG -ne $expectedTag) {
+            throw "Tag '$env:RELEASE_TAG' does not match package version '$($package.version)'."
+          }
+          if ($package.version -notmatch '^\d+\.\d+\.\d+-beta\.\d+$') {
+            throw "Package version '$($package.version)' is not a beta release version."
+          }
+
+      - name: Check public boundary
+        shell: pwsh
+        run: ./.github/scripts/Test-PublicBoundary.ps1
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify tagged source
+        run: pnpm run verify
+
+      - name: Build Windows x64 installer
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: pnpm exec electron-builder --win --x64 --config electron-builder.js
+
+      - name: Verify installer and generate checksum
+        shell: pwsh
+        run: |
+          $package = Get-Content -Raw package.json | ConvertFrom-Json
+          $expectedName = "RT-ResearchFlow-Setup-$($package.version)-x64.exe"
+          $installer = Get-Item -LiteralPath (Join-Path release $expectedName)
+          $unexpectedInstallers = @(Get-ChildItem -LiteralPath release -Filter '*.exe' -File | Where-Object Name -ne $expectedName)
+          if ($unexpectedInstallers.Count -gt 0) {
+            throw "Unexpected installer artifacts: $($unexpectedInstallers.Name -join ', ')"
+          }
+          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $expectedName" | Set-Content -LiteralPath release/SHA256SUMS.txt -Encoding ascii
+          ./.github/scripts/Test-PublicBoundary.ps1 -ArtifactDirectory release
+
+      - name: Smoke test packaged application
+        shell: pwsh
+        env:
+          TRADE_WATCH_PACKAGED_EXECUTABLE: ${{ github.workspace }}\release\win-unpacked\RT-ResearchFlow.exe
+        run: pnpm exec playwright test tests/e2e/packaged-app-smoke.spec.ts --reporter=line
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: RT-ResearchFlow-${{ github.ref_name }}-windows-x64
+          path: |
+            release/RT-ResearchFlow-Setup-*-x64.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create draft prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $package = Get-Content -Raw package.json | ConvertFrom-Json
+          $installer = "release/RT-ResearchFlow-Setup-$($package.version)-x64.exe"
+          gh release create $env:RELEASE_TAG `
+            $installer `
+            'release/SHA256SUMS.txt' `
+            --draft `
+            --prerelease `
+            --verify-tag `
+            --title "RT-ResearchFlow $env:RELEASE_TAG" `
+            --notes-file 'docs/releases/v0.1.0-beta.1.md'

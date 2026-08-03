@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用问题与交流
+    url: https://github.com/caoritian002-wq/RT-ResearchFlow/discussions/categories/q-a
+    about: 安装、配置和使用问题请进入 Q&A。
+  - name: 功能想法
+    url: https://github.com/caoritian002-wq/RT-ResearchFlow/discussions/categories/ideas
+    about: 新功能、工作流和产品建议请进入 Ideas。
+  - name: 私密安全报告
+    url: https://github.com/caoritian002-wq/RT-ResearchFlow/security/advisories/new
+    about: 漏洞或敏感信息暴露请私密报告，不要创建公开 Issue。

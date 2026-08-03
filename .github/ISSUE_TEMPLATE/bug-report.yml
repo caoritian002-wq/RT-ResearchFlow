@@ -1,0 +1,98 @@
+name: Bug 报告
+description: 报告可以稳定复现的安装、运行或功能问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。提交前请先搜索已有 Issue，并移除截图、日志和数据库中的 Token、持仓、个人路径等敏感信息。
+
+  - type: input
+    id: version
+    attributes:
+      label: RT-ResearchFlow 版本
+      description: 可在 Release 名称或安装包文件名中查看。
+      placeholder: 例如 v0.1.0-beta.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: 安装方式
+      options:
+        - Windows x64 安装包
+        - 从源码运行
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 请填写 Windows 版本；源码运行还需填写 Node.js 与 pnpm 版本。
+      placeholder: 例如 Windows 11 23H2；Node.js 20.19.0；pnpm 10.14.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从启动应用或打开具体页面开始，给出能够重复触发问题的最短步骤。
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 看到……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 可附经过脱敏的截图或短录屏。
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 脱敏后的诊断信息
+      description: 可填写错误码、数据质量状态或相关日志片段。请勿上传完整数据库、配置文件、API Key、Token 或真实持仓。
+      render: shell
+
+  - type: dropdown
+    id: network
+    attributes:
+      label: 问题是否涉及联网能力
+      options:
+        - 不确定
+        - 否，本地功能即可复现
+        - 是，涉及公开数据源
+        - 是，涉及 Tushare
+        - 是，涉及 AI Provider 或搜索服务
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我已搜索现有 Issue，未发现相同问题。
+          required: true
+        - label: 我已移除凭据、持仓、个人路径和其他隐私数据。
+          required: true
+        - label: 这不是投资收益、荐股或自动交易诉求。
+          required: true
