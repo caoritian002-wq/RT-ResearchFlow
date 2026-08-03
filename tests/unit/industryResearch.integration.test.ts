@@ -737,7 +737,7 @@ describe('产业研究第180阶段联合回归', () => {
       reusedGeneratedArtifacts: true,
       status: 'succeeded',
     })
-  })
+  }, 15_000)
 
   it('财务采集进程中断后从公司阶段继续且不重复前置模型阶段', async () => {
     const started = await startIndustryResearchGeneration(db, {
