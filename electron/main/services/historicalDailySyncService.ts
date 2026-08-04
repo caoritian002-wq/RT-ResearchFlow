@@ -1,6 +1,11 @@
 import type Database from 'better-sqlite3'
 import type { BrowserWindow } from 'electron'
-import { countDailyCloseByTradeDates, upsertDailyClose } from '../database/dailyCloseCacheRepository'
+import {
+  backfillDailyCloseTurnover,
+  countDailyCloseByTradeDates,
+  countMissingDailyCloseTurnoverByTradeDates,
+  upsertDailyClose,
+} from '../database/dailyCloseCacheRepository'
 import { getLastNTradingDays } from '../database/tradeCalRepository'
 import { fetchDailyBasicByDate, fetchDailyByDate } from './tushareService'
 import { syncTradeCalFull, syncTradeCalIfNeeded } from './tradeCalSyncService'
@@ -92,11 +97,13 @@ export async function runHistoricalDailySync(
     emitProgress(win, progress, options.onProgress)
 
     const coverage = countDailyCloseByTradeDates(db, tradeDays)
+    const turnoverGaps = countMissingDailyCloseTurnoverByTradeDates(db, tradeDays)
 
     for (const tradeDate of tradeDays) {
       progress.currentTradeDate = tradeDate
       const existingRows = coverage.get(tradeDate) ?? 0
-      if (existingRows >= completeRowThreshold) {
+      const missingTurnoverRows = turnoverGaps.get(tradeDate) ?? 0
+      if (existingRows >= completeRowThreshold && missingTurnoverRows === 0) {
         progress.processedTradeDays += 1
         progress.skippedTradeDays += 1
         progress.message = `${tradeDate} 已有 ${existingRows} 条日线, 跳过`
@@ -106,33 +113,50 @@ export async function runHistoricalDailySync(
 
       let requested = false
       try {
-        progress.message = `正在同步 ${tradeDate} 全市场日线`
-        emitProgress(win, progress, options.onProgress)
-        requested = true
-        const rows = await fetchDailyByDate(token, tradeDate)
-        if (rows.length === 0) {
-          progress.failedTradeDays += 1
-          failedDates.push(tradeDate)
-          progress.message = `${tradeDate} daily 返回 0 行`
-        } else {
-          let mergedRows = rows
-          try {
-            const basics = await fetchDailyBasicByDate(token, tradeDate)
-            if (basics.length > 0) {
-              const turnoverMap = new Map(basics.map((row) => [row.tsCode, row.turnoverRate]))
-              mergedRows = rows.map((row) => ({
-                ...row,
-                turnoverRate: turnoverMap.get(row.tsCode) ?? row.turnoverRate ?? null
-              }))
-            }
-          } catch (err) {
-            console.warn('[HistoricalDailySync] daily_basic merge failed:', err instanceof Error ? err.message : String(err))
+        if (existingRows >= completeRowThreshold) {
+          progress.message = `正在补齐 ${tradeDate} 的 ${missingTurnoverRows} 条换手率`
+          emitProgress(win, progress, options.onProgress)
+          requested = true
+          const basics = await fetchDailyBasicByDate(token, tradeDate)
+          const updated = backfillDailyCloseTurnover(db, basics)
+          progress.insertedRows += updated
+          if (updated >= missingTurnoverRows) {
+            progress.syncedTradeDays += 1
+            progress.message = `${tradeDate} 已补齐 ${updated} 条换手率`
+          } else {
+            progress.failedTradeDays += 1
+            failedDates.push(tradeDate)
+            progress.message = `${tradeDate} 仅补齐 ${updated}/${missingTurnoverRows} 条换手率`
           }
+        } else {
+          progress.message = `正在同步 ${tradeDate} 全市场日线`
+          emitProgress(win, progress, options.onProgress)
+          requested = true
+          const rows = await fetchDailyByDate(token, tradeDate)
+          if (rows.length === 0) {
+            progress.failedTradeDays += 1
+            failedDates.push(tradeDate)
+            progress.message = `${tradeDate} daily 返回 0 行`
+          } else {
+            let mergedRows = rows
+            try {
+              const basics = await fetchDailyBasicByDate(token, tradeDate)
+              if (basics.length > 0) {
+                const turnoverMap = new Map(basics.map((row) => [row.tsCode, row.turnoverRate]))
+                mergedRows = rows.map((row) => ({
+                  ...row,
+                  turnoverRate: turnoverMap.get(row.tsCode) ?? row.turnoverRate ?? null
+                }))
+              }
+            } catch (err) {
+              console.warn('[HistoricalDailySync] daily_basic merge failed:', err instanceof Error ? err.message : String(err))
+            }
 
-          upsertDailyClose(db, mergedRows)
-          progress.insertedRows += mergedRows.length
-          progress.syncedTradeDays += 1
-          progress.message = `${tradeDate} 写入 ${mergedRows.length} 条日线`
+            upsertDailyClose(db, mergedRows)
+            progress.insertedRows += mergedRows.length
+            progress.syncedTradeDays += 1
+            progress.message = `${tradeDate} 写入 ${mergedRows.length} 条日线`
+          }
         }
       } catch (err) {
         progress.failedTradeDays += 1
