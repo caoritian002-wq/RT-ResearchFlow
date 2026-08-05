@@ -123,6 +123,11 @@ interface EastmoneyKlineResponse {
   }
 }
 
+type EastmoneyParsedDailyRow = StockPriceCacheRow & {
+  pctChg: number | null
+  turnoverRate: number | null
+}
+
 export type SingleStockDailyProvider = 'eastmoney'
 export type SingleStockDailyState = 'complete' | 'degraded'
 
@@ -165,8 +170,8 @@ function parseEastmoneyDailyRows(
   stockCode: string,
   klines: string[],
   fetchedAt: number,
-): StockPriceCacheRow[] {
-  const rows = klines.flatMap((kline): StockPriceCacheRow[] => {
+): EastmoneyParsedDailyRow[] {
+  const rows = klines.flatMap((kline): EastmoneyParsedDailyRow[] => {
     const parts = kline.split(',')
     if (parts.length < 7) return []
     const tradeDate = parts[0].replace(/-/g, '')
@@ -186,6 +191,8 @@ function parseEastmoneyDailyRows(
       low: numberOrNull(parts[4]),
       volume: numberOrNull(parts[5]),
       amount: amountYuan == null ? null : amountYuan / 1000,
+      pctChg: numberOrNull(parts[8]),
+      turnoverRate: numberOrNull(parts[10]),
       fetchedAt,
     }]
   })
@@ -227,7 +234,7 @@ export async function fetchEastmoneySingleStockDaily(
     url.searchParams.set('beg', startDate30)
     url.searchParams.set('end', endDate)
     url.searchParams.set('fields1', 'f1,f2,f3,f4,f5,f6')
-    url.searchParams.set('fields2', 'f51,f52,f53,f54,f55,f56,f57')
+    url.searchParams.set('fields2', 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61')
     url.searchParams.set('lmt', '149')
     url.searchParams.set('_', String(Date.now()))
 
@@ -254,9 +261,11 @@ export async function fetchEastmoneySingleStockDaily(
 
     const dailyRows: DailyRow[] = rows.map((row, index) => {
       const previousClose = index > 0 ? rows[index - 1].close : null
-      const pctChg = previousClose != null && previousClose > 0 && row.close != null
-        ? (row.close - previousClose) / previousClose * 100
-        : 0
+      const pctChg = row.pctChg ?? (
+        previousClose != null && previousClose > 0 && row.close != null
+          ? (row.close - previousClose) / previousClose * 100
+          : 0
+      )
       return {
         tsCode: normalized.tsCode,
         tradeDate: row.tradeDate,
@@ -266,7 +275,7 @@ export async function fetchEastmoneySingleStockDaily(
         close: row.close!,
         pctChg,
         vol: row.volume,
-        turnoverRate: null,
+        turnoverRate: row.turnoverRate,
         amount: row.amount,
       }
     })
@@ -585,7 +594,7 @@ export async function forceFetchSingleStock(
       token,
       'daily',
       { ts_code: tsCode, start_date: startDate30, end_date: endDate },
-      'trade_date,open,high,low,close,vol,amount'
+       'trade_date,open,high,low,close,pct_chg,vol,amount'
     )
   ))
   const json = (await res.json()) as TushareResponse
@@ -595,20 +604,57 @@ export async function forceFetchSingleStock(
     const idx = (name: string) => fields.indexOf(name)
     const nowMs = Date.now()
     const newRows: StockPriceCacheRow[] = []
+    const dailyRows: DailyRow[] = []
     for (const item of items) {
+      const tradeDate = parseStrOrNull(item[idx('trade_date')])
+      const close = parseNumOrNull(item[idx('close')])
+      if (!tradeDate || close == null) continue
+      const open = parseNumOrNull(item[idx('open')])
+      const high = parseNumOrNull(item[idx('high')])
+      const low = parseNumOrNull(item[idx('low')])
+      const pctChg = parseNumOrNull(item[idx('pct_chg')])
+      const vol = parseNumOrNull(item[idx('vol')])
+      const amount = parseNumOrNull(item[idx('amount')])
       newRows.push({
         stockCode,
-        tradeDate: String(item[idx('trade_date')]),
-        open: item[idx('open')] as number | null,
-        high: item[idx('high')] as number | null,
-        low: item[idx('low')] as number | null,
-        close: item[idx('close')] as number | null,
-        volume: item[idx('vol')] as number | null,
-        amount: item[idx('amount')] as number | null,
+        tradeDate,
+        open,
+        high,
+        low,
+        close,
+        volume: vol,
+        amount,
         fetchedAt: nowMs
       })
+      dailyRows.push({
+        tsCode,
+        tradeDate,
+        open,
+        high,
+        low,
+        close,
+        pctChg: pctChg ?? 0,
+        vol,
+        turnoverRate: null,
+        amount,
+      })
     }
-    if (newRows.length > 0) insertPrices(db, newRows)
+    if (newRows.length > 0) {
+      try {
+        await sleep(300)
+        const basics = await fetchDailyBasicForStock(token, tsCode, startDate30, endDate)
+        const turnoverByDate = new Map(basics.map((row) => [row.tradeDate, row.turnoverRate]))
+        for (const row of dailyRows) {
+          row.turnoverRate = turnoverByDate.get(row.tradeDate) ?? null
+        }
+      } catch (error) {
+        console.warn('[SingleStockRefresh] daily_basic merge failed:', error instanceof Error ? error.message : String(error))
+      }
+      db.transaction(() => {
+        insertPrices(db, newRows)
+        upsertDailyClose(db, dailyRows)
+      })()
+    }
 
     // FR-093: during provider lag (intraday available, daily missing), backfill today's daily row.
     await backfillTodayDailyFromIntradayIfMissing(db, stockCode)
@@ -1811,6 +1857,39 @@ export async function fetchDailyBasicByDate(
     const floatShare = parseNumOrNull(it[idx('float_share')])
     if (!tsCode || !tradeDate_) continue
     results.push({ tsCode, tradeDate: tradeDate_, turnoverRate, floatShare })
+  }
+  return results
+}
+
+/** 按单只股票和日期范围读取历史换手率，用于显式个股刷新。 */
+export async function fetchDailyBasicForStock(
+  token: string,
+  tsCode: string,
+  startDate: string,
+  endDate?: string,
+): Promise<DailyBasicRow[]> {
+  const params: Record<string, string> = {
+    ts_code: tsCode,
+    start_date: startDate,
+    limit: '8000',
+  }
+  if (endDate) params.end_date = endDate
+  const fields = 'ts_code,trade_date,turnover_rate,float_share'
+  const json = await callTushareApi(token, 'daily_basic', params, fields)
+  if (!json.data) return []
+  const { fields: responseFields, items } = json.data
+  const idx = (name: string) => responseFields.indexOf(name)
+  const results: DailyBasicRow[] = []
+  for (const item of items) {
+    const returnedTsCode = parseStrOrNull(item[idx('ts_code')])
+    const tradeDate = parseStrOrNull(item[idx('trade_date')])
+    if (!returnedTsCode || !tradeDate) continue
+    results.push({
+      tsCode: returnedTsCode,
+      tradeDate,
+      turnoverRate: parseNumOrNull(item[idx('turnover_rate')]),
+      floatShare: parseNumOrNull(item[idx('float_share')]),
+    })
   }
   return results
 }

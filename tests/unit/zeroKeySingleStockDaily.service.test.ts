@@ -12,7 +12,7 @@ function createDb(): Database.Database {
   return db
 }
 
-function buildKlines(count: number): string[] {
+function buildKlines(count: number, includeTurnover = true): string[] {
   const rows: string[] = []
   const beijingToday = new Date(Date.now() + 8 * 60 * 60 * 1000)
   const cursor = new Date(Date.UTC(
@@ -32,6 +32,10 @@ function buildKlines(count: number): string[] {
       (close - 0.2).toFixed(2),
       String(1000 + index),
       (1_000_000 + index * 1000).toFixed(0),
+      '3.00',
+      '',
+      '',
+      includeTurnover ? (2 + index / 100).toFixed(2) : '',
     ].join(','))
     cursor.setUTCDate(cursor.getUTCDate() + 1)
   }
@@ -80,6 +84,7 @@ describe('FR-252 zero-key single-stock daily fetch', () => {
     expect(requestUrl.protocol).toBe('https:')
     expect(requestUrl.searchParams.get('secid')).toBe('1.600519')
     expect(requestUrl.searchParams.get('lmt')).toBe('149')
+    expect(requestUrl.searchParams.get('fields2')).toContain('f61')
     expect(benchmarkUrl.searchParams.get('secid')).toBe('1.000300')
 
     const priceRows = db.prepare(
@@ -107,7 +112,7 @@ describe('FR-252 zero-key single-stock daily fetch', () => {
     expect(dailyRows[1].pct_chg).toBeCloseTo(
       (dailyRows[1].close - dailyRows[0].close) / dailyRows[0].close * 100,
     )
-    expect(dailyRows.every((row) => row.turnover_rate == null)).toBe(true)
+    expect(dailyRows.every((row) => row.turnover_rate != null)).toBe(true)
     expect(priceRows[0].amount).toBeGreaterThan(1000)
     expect(stockInfo.stockName).toBe('贵州茅台')
     expect(db.prepare(
@@ -123,7 +128,7 @@ describe('FR-252 zero-key single-stock daily fetch', () => {
       ok: true,
       json: async () => ({
         rc: 0,
-        data: { name: '测试股份', klines: buildKlines(20) },
+        data: { name: '测试股份', klines: buildKlines(20, false) },
       }),
     })
 

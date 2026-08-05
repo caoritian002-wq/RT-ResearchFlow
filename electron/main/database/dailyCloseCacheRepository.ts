@@ -6,7 +6,7 @@
  */
 
 import type Database from 'better-sqlite3'
-import type { DailyRow } from '../services/tushareService'
+import type { DailyBasicRow, DailyRow } from '../services/tushareService'
 
 export const DAILY_CLOSE_RETENTION_TRADE_DAYS = 520
 
@@ -301,6 +301,55 @@ export function countDailyCloseByTradeDates(
     .all(...tradeDates) as { trade_date: string; count: number }[]
   for (const row of rows) result.set(row.trade_date, row.count)
   return result
+}
+
+/** 统计已上市 A 股日线中仍缺少换手率的记录，指数等非股票代码不计入缺口。 */
+export function countMissingDailyCloseTurnoverByTradeDates(
+  db: Database.Database,
+  tradeDates: string[],
+): Map<string, number> {
+  const result = new Map<string, number>()
+  if (tradeDates.length === 0) return result
+  const placeholders = tradeDates.map(() => '?').join(', ')
+  const rows = db.prepare(`
+    SELECT d.trade_date, COUNT(*) AS count
+    FROM daily_close_cache d
+    INNER JOIN stock_basic_cache s
+      ON s.ts_code = d.ts_code AND s.list_status = 'L'
+    WHERE d.trade_date IN (${placeholders})
+      AND d.turnover_rate IS NULL
+    GROUP BY d.trade_date
+  `).all(...tradeDates) as Array<{ trade_date: string; count: number }>
+  for (const row of rows) result.set(row.trade_date, row.count)
+  return result
+}
+
+/** 只补齐已有日线的空换手率，不创建孤立日线，也不改写已有非空事实。 */
+export function backfillDailyCloseTurnover(
+  db: Database.Database,
+  rows: DailyBasicRow[],
+): number {
+  const candidates = rows.filter((row) => row.turnoverRate != null)
+  if (candidates.length === 0) return 0
+  const stmt = db.prepare(`
+    UPDATE daily_close_cache
+    SET turnover_rate = @turnover_rate
+    WHERE ts_code = @ts_code
+      AND trade_date = @trade_date
+      AND turnover_rate IS NULL
+  `)
+  const updateAll = db.transaction((items: DailyBasicRow[]) => {
+    let updated = 0
+    for (const item of items) {
+      updated += stmt.run({
+        ts_code: item.tsCode,
+        trade_date: item.tradeDate,
+        turnover_rate: item.turnoverRate,
+      }).changes
+    }
+    return updated
+  })
+  return updateAll(candidates)
 }
 
 /** 返回某日期之后已有日线的交易日数量。 */

@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
+  backfillDailyCloseTurnover: vi.fn(),
   countDailyCloseByTradeDates: vi.fn(),
+  countMissingDailyCloseTurnoverByTradeDates: vi.fn(),
   upsertDailyClose: vi.fn(),
   getLastNTradingDays: vi.fn(),
   fetchDailyBasicByDate: vi.fn(),
@@ -11,7 +13,9 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../../electron/main/database/dailyCloseCacheRepository', () => ({
+  backfillDailyCloseTurnover: mocks.backfillDailyCloseTurnover,
   countDailyCloseByTradeDates: mocks.countDailyCloseByTradeDates,
+  countMissingDailyCloseTurnoverByTradeDates: mocks.countMissingDailyCloseTurnoverByTradeDates,
   upsertDailyClose: mocks.upsertDailyClose,
 }))
 vi.mock('../../electron/main/database/tradeCalRepository', () => ({
@@ -34,6 +38,8 @@ describe('historicalDailySyncService', () => {
     mocks.syncTradeCalIfNeeded.mockResolvedValue(undefined)
     mocks.syncTradeCalFull.mockResolvedValue(undefined)
     mocks.countDailyCloseByTradeDates.mockReturnValue(new Map())
+    mocks.countMissingDailyCloseTurnoverByTradeDates.mockReturnValue(new Map())
+    mocks.backfillDailyCloseTurnover.mockReturnValue(0)
     mocks.fetchDailyBasicByDate.mockResolvedValue([])
     mocks.fetchDailyByDate.mockResolvedValue([])
   })
@@ -105,5 +111,33 @@ describe('historicalDailySyncService', () => {
     expect(mocks.upsertDailyClose).toHaveBeenCalledOnce()
     expect(result).toMatchObject({ syncedTradeDays: 1, skippedTradeDays: 2, failedTradeDays: 0 })
     expect(onProgress).toHaveBeenCalled()
+  })
+
+  it('日线行数完整但换手率缺失时只补 daily_basic 而不重复拉取 daily', async () => {
+    mocks.getLastNTradingDays.mockReturnValue(['20260623'])
+    mocks.countDailyCloseByTradeDates.mockReturnValue(new Map([['20260623', 5518]]))
+    mocks.countMissingDailyCloseTurnoverByTradeDates.mockReturnValue(new Map([['20260623', 2]]))
+    const basics = [
+      { tsCode: '600487.SH', tradeDate: '20260623', turnoverRate: 7.5, floatShare: 245000 },
+      { tsCode: '000977.SZ', tradeDate: '20260623', turnoverRate: 5.2, floatShare: 146000 },
+    ]
+    mocks.fetchDailyBasicByDate.mockResolvedValue(basics)
+    mocks.backfillDailyCloseTurnover.mockReturnValue(2)
+
+    const result = await runHistoricalDailySync({} as never, 'token', undefined, {
+      tradeDayCount: 1,
+      completeRowThreshold: 4000,
+      requestDelayMs: 0,
+    })
+
+    expect(mocks.fetchDailyByDate).not.toHaveBeenCalled()
+    expect(mocks.fetchDailyBasicByDate).toHaveBeenCalledWith('token', '20260623')
+    expect(mocks.backfillDailyCloseTurnover).toHaveBeenCalledWith(expect.anything(), basics)
+    expect(result).toMatchObject({
+      syncedTradeDays: 1,
+      skippedTradeDays: 0,
+      failedTradeDays: 0,
+      insertedRows: 2,
+    })
   })
 })

@@ -1,7 +1,9 @@
 import Database from 'better-sqlite3'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  backfillDailyCloseTurnover,
   cleanupDailyCloseCache,
+  countMissingDailyCloseTurnoverByTradeDates,
   DAILY_CLOSE_RETENTION_TRADE_DAYS,
   getDailyCloseQualitySummary,
   queryDailyCloseExact,
@@ -146,6 +148,42 @@ describe('dailyCloseCacheRepository', () => {
       close: 10,
       turnover_rate: null,
     }))
+  })
+
+  it('只统计上市股票的换手率缺口并只补已有空值', () => {
+    const db = createQualityDb()
+    db.exec(`
+      CREATE TABLE stock_basic_cache (
+        ts_code TEXT PRIMARY KEY,
+        list_status TEXT NOT NULL
+      );
+      INSERT INTO stock_basic_cache VALUES
+        ('600487.SH', 'L'),
+        ('000977.SZ', 'L'),
+        ('600000.SH', 'D');
+      INSERT INTO daily_close_cache VALUES
+        ('600487.SH', '20260623', 10, 11, 9, 10.5, 1, 100, NULL),
+        ('000977.SZ', '20260623', 20, 21, 19, 20.5, 1, 200, 3.2),
+        ('600000.SH', '20260623', 8, 9, 7, 8.5, 1, 300, NULL),
+        ('000001.SH', '20260623', 10, 10, 10, 10, 0, 400, NULL);
+    `)
+
+    expect(countMissingDailyCloseTurnoverByTradeDates(db, ['20260623'])).toEqual(
+      new Map([['20260623', 1]]),
+    )
+    expect(backfillDailyCloseTurnover(db, [
+      { tsCode: '600487.SH', tradeDate: '20260623', turnoverRate: 7.5, floatShare: 245000 },
+      { tsCode: '000977.SZ', tradeDate: '20260623', turnoverRate: 9.9, floatShare: 146000 },
+      { tsCode: '999999.SZ', tradeDate: '20260623', turnoverRate: 1, floatShare: 1 },
+    ])).toBe(1)
+    expect(db.prepare(`
+      SELECT ts_code, turnover_rate FROM daily_close_cache
+      WHERE ts_code IN ('600487.SH', '000977.SZ') ORDER BY ts_code
+    `).all()).toEqual([
+      { ts_code: '000977.SZ', turnover_rate: 3.2 },
+      { ts_code: '600487.SH', turnover_rate: 7.5 },
+    ])
+    db.close()
   })
 
   it('精确日期查询不读取后续日期且同日优先使用带后缀代码', () => {
