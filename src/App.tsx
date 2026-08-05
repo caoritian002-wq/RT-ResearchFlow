@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { useAppStore } from './store/appStore'
 import { isInTradingHours } from './utils/tradingHours'
 import { FilterBar } from './components/FilterBar/FilterBar'
@@ -44,6 +44,7 @@ import {
   type DecisionSignalToastBatch,
   type DecisionSignalToastSignal,
 } from './components/DecisionSignalToast/decisionSignalToastModel'
+import { useDecisionSignalToastPreview } from '@renderer/components/DecisionSignalToast/useDecisionSignalToastPreview'
 
 const AIAnalysis = lazy(() => import('./components/AIAnalysis/AIAnalysis').then((module) => ({ default: module.AIAnalysis })))
 const DeepResearchWorkbench = lazy(() => import('./components/AIAnalysis/DeepResearchWorkbench').then((module) => ({ default: module.DeepResearchWorkbench })))
@@ -196,6 +197,13 @@ export default function App() {
   const [decisionSignalToastKey, setDecisionSignalToastKey] = useState(0)
   const decisionSignalBufferRef = useRef<DecisionSignalToastSignal[]>([])
   const decisionSignalAggregationTimerRef = useRef<number | null>(null)
+  const showDecisionSignalToastPreview = useCallback((signal: DecisionSignalToastSignal) => {
+    const notice = buildDecisionSignalToastBatch([signal])
+    if (!notice) return
+    setDecisionSignalToastKey((current) => current + 1)
+    setDecisionSignalToast(notice)
+  }, [])
+  const priorityNewsPreview = useDecisionSignalToastPreview(showDecisionSignalToastPreview)
   const industryResearchStageProgress = industryResearchTask
     ? buildResearchStageProgress({
         status: industryResearchTask.status,
@@ -618,6 +626,14 @@ export default function App() {
     if (briefingId !== null) navigateToBriefing(briefingId)
   }
 
+  async function startPriorityNewsPreview(): Promise<void> {
+    if (await priorityNewsPreview.start()) setConfigDrawerOpen(false)
+  }
+
+  async function showNextPriorityNewsPreview(): Promise<void> {
+    if (await priorityNewsPreview.showNext()) setConfigDrawerOpen(false)
+  }
+
   const NAV_TABS: Array<{ tab: Tab; label: string; icon: PrimaryNavigationIconName }> = [
     { tab: 'decision-center', label: '今日看板', icon: 'dashboard' },
     { tab: 'stock-chart', label: '股票走势图', icon: 'stock' },
@@ -877,6 +893,10 @@ export default function App() {
         onToggleTheme={toggleTheme}
         initializationFlow={initializationFlow}
         onStartInitialization={startInitializationFlow}
+        priorityNewsPreview={priorityNewsPreview.state}
+        onStartPriorityNewsPreview={startPriorityNewsPreview}
+        onShowNextPriorityNewsPreview={showNextPriorityNewsPreview}
+        onStopPriorityNewsPreview={priorityNewsPreview.stop}
       />
       <MessageCenterDrawer open={messageCenterOpen} messages={messages} onClose={() => setMessageCenterOpen(false)} />
       {onboardingOpen && (

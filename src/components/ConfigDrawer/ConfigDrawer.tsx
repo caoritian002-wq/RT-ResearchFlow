@@ -5,9 +5,11 @@ import { AIConfig } from '../AIConfig/AIConfig'
 import { DataSource } from '../DataSource/DataSource'
 import { DiagnosticsPanel } from '../Diagnostics/DiagnosticsPanel'
 import { UserTierDevPanel } from './UserTierDevPanel'
+import { PriorityNewsPreviewDevPanel } from './PriorityNewsPreviewDevPanel'
 import type { InitializationFlowState } from '../Onboarding/initializationTaskModel'
+import type { PriorityNewsPreviewState } from '../DecisionSignalToast/useDecisionSignalToastPreview'
 
-export type ConfigDrawerTab = 'sources' | 'settings' | 'appearance' | 'ai-config' | 'datasource' | 'diagnostics' | 'user-tier-dev'
+export type ConfigDrawerTab = 'sources' | 'settings' | 'appearance' | 'ai-config' | 'datasource' | 'diagnostics' | 'user-tier-dev' | 'notification-preview-dev'
 
 interface ConfigDrawerProps {
   open: boolean
@@ -19,6 +21,10 @@ interface ConfigDrawerProps {
   onToggleTheme: () => void
   initializationFlow?: InitializationFlowState
   onStartInitialization?: () => void
+  priorityNewsPreview?: PriorityNewsPreviewState
+  onStartPriorityNewsPreview?: () => Promise<void>
+  onShowNextPriorityNewsPreview?: () => Promise<void>
+  onStopPriorityNewsPreview?: () => void
 }
 
 const CONFIG_TABS: Array<{ key: ConfigDrawerTab; label: string }> = [
@@ -28,10 +34,13 @@ const CONFIG_TABS: Array<{ key: ConfigDrawerTab; label: string }> = [
   { key: 'ai-config', label: 'AI配置' },
   { key: 'datasource', label: '数据源' },
   { key: 'diagnostics', label: '诊断' },
-  ...(import.meta.env.DEV ? [{ key: 'user-tier-dev' as const, label: '用户层级' }] : [])
+  ...(import.meta.env.DEV ? [
+    { key: 'user-tier-dev' as const, label: '用户层级' },
+    { key: 'notification-preview-dev' as const, label: '通知验收' },
+  ] : [])
 ]
 
-export function ConfigDrawer({ open, activeTab, onTabChange, onClose, onOpenGuide, theme, onToggleTheme, initializationFlow, onStartInitialization }: ConfigDrawerProps) {
+export function ConfigDrawer({ open, activeTab, onTabChange, onClose, onOpenGuide, theme, onToggleTheme, initializationFlow, onStartInitialization, priorityNewsPreview, onStartPriorityNewsPreview, onShowNextPriorityNewsPreview, onStopPriorityNewsPreview }: ConfigDrawerProps) {
   useEffect(() => {
     if (!open) return
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -171,6 +180,22 @@ export function ConfigDrawer({ open, activeTab, onTabChange, onClose, onOpenGuid
               <UserTierDevPanel />
             </div>
           )}
+          {import.meta.env.DEV
+            && activeTab === 'notification-preview-dev'
+            && priorityNewsPreview
+            && onStartPriorityNewsPreview
+            && onShowNextPriorityNewsPreview
+            && onStopPriorityNewsPreview
+            && (
+              <div data-testid="config-panel-notification-preview-dev" className="h-full overflow-hidden">
+                <PriorityNewsPreviewDevPanel
+                  state={priorityNewsPreview}
+                  onStart={onStartPriorityNewsPreview}
+                  onShowNext={onShowNextPriorityNewsPreview}
+                  onStop={onStopPriorityNewsPreview}
+                />
+              </div>
+            )}
         </div>
       </aside>
     </div>
