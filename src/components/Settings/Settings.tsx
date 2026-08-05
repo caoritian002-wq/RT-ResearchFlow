@@ -110,7 +110,7 @@ export function Settings() {
   }
 
   return (
-    <div className="p-6 max-w-3xl">
+    <div className="w-full p-6">
       <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100 mb-5">应用设置</h2>
 
       {/* Scan interval */}
