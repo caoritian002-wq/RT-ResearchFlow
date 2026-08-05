@@ -25,6 +25,7 @@ const UPDATABLE_APP_SETTING_KEYS = new Set<string>([
   'sector_concept_source',
   'decision_notify_windows_enabled',
   'decision_notify_min_priority',
+  'decision_notify_in_app_enabled',
   'supply_chain_llm_fallback',
   'decision_center_filters_json',
 ])
@@ -60,6 +61,13 @@ export function updateSettings(data: Partial<Omit<AppSettingsRow, 'id'>>): AppSe
   if (keys.length === 0) return getSettings()
   if (keys.some((key) => !UPDATABLE_APP_SETTING_KEYS.has(String(key)))) {
     throw new Error('SETTINGS_FIELD_NOT_ALLOWED')
+  }
+  if (
+    data.decision_notify_in_app_enabled !== undefined
+    && data.decision_notify_in_app_enabled !== 0
+    && data.decision_notify_in_app_enabled !== 1
+  ) {
+    throw new Error('SETTINGS_VALUE_INVALID')
   }
 
   const setClauses = keys.map((k) => `${k} = @${k}`).join(', ')

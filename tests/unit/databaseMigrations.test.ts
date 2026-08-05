@@ -76,11 +76,17 @@ describe('数据库 Migration 执行器', () => {
       expect(getAppliedVersions(db)).toContain(129)
       expect(getAppliedVersions(db)).toContain(131)
       expect(getAppliedVersions(db)).toContain(132)
+      expect(getAppliedVersions(db)).toContain(133)
       const appSettingsColumns = db.prepare('PRAGMA table_info(app_settings)').all() as Array<{
         name: string
       }>
       expect(appSettingsColumns.map((column) => column.name)).toContain('decision_center_filters_json')
       expect(appSettingsColumns.map((column) => column.name)).toContain('premarket_network_enabled')
+      expect(appSettingsColumns.map((column) => column.name)).toContain('decision_notify_in_app_enabled')
+      expect(db.prepare('SELECT decision_notify_in_app_enabled FROM app_settings WHERE id = 1').get())
+        .toEqual({ decision_notify_in_app_enabled: 1 })
+      expect(() => db.prepare('UPDATE app_settings SET decision_notify_in_app_enabled = 2 WHERE id = 1').run())
+        .toThrow()
       const premarketFactColumns = db.prepare('PRAGMA table_info(premarket_fact_snapshots)').all() as Array<{
         name: string
       }>

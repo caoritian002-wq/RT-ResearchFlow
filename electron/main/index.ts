@@ -52,7 +52,7 @@ import { isArticleExpired } from './utils/articleAgeUtils'
 import { startScheduler, stopScheduler, runConceptMembersSyncJob } from './services/schedulerService'
 import { syncTradeCalIfNeeded } from './services/tradeCalSyncService'
 import { scheduleDailyCleanup } from './services/cleanerService'
-import { emitDecisionSignals, type DecisionSignalInput } from './services/decisionSignalService'
+import { emitPriorityNewsSignalsForScan } from './services/newsDecisionSignalService'
 import {
   startHeartbeat,
   stopHeartbeat,
@@ -79,6 +79,12 @@ let databaseReady = false
  */
 function triggerAIAnalysisIfAvailable(scanRunId: number | null, briefingScanRunId: number): void {
   if (!mainWindow) return
+  try {
+    emitPriorityNewsSignalsForScan(getDb(), briefingScanRunId, mainWindow)
+  } catch (err) {
+    console.error('[DecisionSignal] Failed to emit priority news signals:', err)
+  }
+
   try {
     const db = getDb()
     const aiConfig = getAIConfig(db)
@@ -121,26 +127,6 @@ function triggerAIAnalysisIfAvailable(scanRunId: number | null, briefingScanRunI
     // Only push event if at least one non-expired article exists
     const activeCount = articles.filter((a) => !a.isExpired).length
     if (activeCount === 0) return
-
-    const newsSignals: DecisionSignalInput[] = rows
-      .filter((r) => r.impactRating === 'CRITICAL' || r.impactRatingScore >= 30)
-      .slice(0, 10)
-      .map((r) => ({
-        sourceModule: 'news',
-        strategyKey: 'news.critical',
-        signalType: 'INFO',
-        direction: 'NEUTRAL',
-        priority: r.impactRating === 'CRITICAL' ? 4 : 3,
-        score: r.impactRatingScore,
-        confidence: 70,
-        title: r.title,
-        summary: r.summary,
-        reason: { impactRating: r.impactRating, impactRatingScore: r.impactRatingScore },
-        sourceRef: { briefingId: r.id, originalUrl: r.originalUrl, scanRunId: briefingScanRunId },
-        signalTime: r.publishedAt ?? Date.now(),
-        dedupKey: `news:critical:${r.id}`,
-      }))
-    emitDecisionSignals(db, newsSignals, mainWindow ?? undefined)
 
     sendScanEvent(mainWindow, 'scan:aiAnalysisAvailable', { scanRunId, articles })
   } catch (err) {

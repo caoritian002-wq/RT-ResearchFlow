@@ -85,7 +85,7 @@ export function emitDecisionSignal(
   const normalized = normalizeInput(input, signalTime, now)
   const result = upsertDecisionSignal(db, normalized)
 
-  if (result.inserted && normalized.priority >= 4) {
+  if (result.inserted && normalized.priority >= 3) {
     pushDecisionSignalCreated(win, result.signal)
   }
   return result.signal
@@ -107,7 +107,7 @@ export function emitDecisionSignals(
   )
   const signals = upsertDecisionSignals(db, rows)
   for (const signal of signals) {
-    if (!beforeKeys.has(signal.dedupKey) && signal.priority >= 4) {
+    if (!beforeKeys.has(signal.dedupKey) && signal.priority >= 3) {
       pushDecisionSignalCreated(win, signal)
     }
   }

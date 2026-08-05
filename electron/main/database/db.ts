@@ -4336,6 +4336,79 @@ const MIGRATIONS: DatabaseMigration[] = [
         BEFORE DELETE ON premarket_fact_snapshots
         BEGIN SELECT RAISE(ABORT, 'PREMARKET_FACT_SNAPSHOT_IMMUTABLE'); END;
     `
+  },
+  {
+    // FR-260: 应用内决策信号提醒与 Windows 原生通知独立开关
+    version: 133,
+    sql: `
+      ALTER TABLE app_settings
+        ADD COLUMN decision_notify_in_app_enabled INTEGER NOT NULL DEFAULT 1
+        CHECK (decision_notify_in_app_enabled IN (0, 1));
+    `
+  },
+  {
+    // Built-in source defaults remain upgradeable until the user saves local overrides.
+    version: 134,
+    sql: `
+      CREATE TABLE built_in_source_state (
+        source_id            INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+        seed_key             TEXT NOT NULL UNIQUE CHECK (length(trim(seed_key)) BETWEEN 1 AND 80),
+        has_local_overrides  INTEGER NOT NULL DEFAULT 0
+          CHECK (has_local_overrides IN (0, 1))
+      );
+
+      INSERT OR IGNORE INTO built_in_source_state (source_id, seed_key, has_local_overrides)
+      SELECT
+        id,
+        CASE
+          WHEN nameEN = 'CSRC' OR url LIKE '%csrc.gov.cn%' THEN 'csrc'
+          WHEN nameEN = 'PBOC' OR url LIKE '%pbc.gov.cn%' THEN 'pboc'
+          WHEN nameEN = 'NDRC' OR url LIKE '%ndrc.gov.cn%' THEN 'ndrc'
+          WHEN nameEN = 'MOFCOM' OR url LIKE '%mofcom.gov.cn%' THEN 'mofcom'
+          WHEN nameEN = 'NBS' OR url LIKE '%stats.gov.cn%' THEN 'nbs'
+          WHEN nameEN = 'MOF' OR url LIKE '%mof.gov.cn%' THEN 'mof'
+          WHEN nameEN = 'State Council' OR url LIKE '%gov.cn%' THEN 'state-council'
+          WHEN nameEN = 'Xinhua Finance' OR url LIKE '%xinhuanet.com%' THEN 'xinhua-finance'
+          WHEN nameEN = 'People''s Daily Finance' OR url LIKE '%people.com.cn%' THEN 'people-finance'
+          WHEN nameEN = 'Financial News' OR url LIKE '%financialnews.com.cn%' THEN 'financial-news'
+          WHEN nameEN = 'China Securities Journal' OR url LIKE '%cs.com.cn%' THEN 'csj'
+          WHEN nameEN = 'Shanghai Securities News' OR url LIKE '%shobserver.com%' THEN 'ssn'
+          WHEN nameEN = 'Securities Times' OR url LIKE '%stcn.com%' THEN 'stcn'
+          WHEN nameEN = 'Caixin' OR url LIKE '%caixin.com%' THEN 'caixin'
+          WHEN nameEN = '21st Century Business Herald' OR url LIKE '%21jingji.com%' THEN '21jingji'
+        END,
+        1
+      FROM sources
+      WHERE isBuiltIn = 1
+        AND CASE
+          WHEN nameEN = 'CSRC' OR url LIKE '%csrc.gov.cn%' THEN 'csrc'
+          WHEN nameEN = 'PBOC' OR url LIKE '%pbc.gov.cn%' THEN 'pboc'
+          WHEN nameEN = 'NDRC' OR url LIKE '%ndrc.gov.cn%' THEN 'ndrc'
+          WHEN nameEN = 'MOFCOM' OR url LIKE '%mofcom.gov.cn%' THEN 'mofcom'
+          WHEN nameEN = 'NBS' OR url LIKE '%stats.gov.cn%' THEN 'nbs'
+          WHEN nameEN = 'MOF' OR url LIKE '%mof.gov.cn%' THEN 'mof'
+          WHEN nameEN = 'State Council' OR url LIKE '%gov.cn%' THEN 'state-council'
+          WHEN nameEN = 'Xinhua Finance' OR url LIKE '%xinhuanet.com%' THEN 'xinhua-finance'
+          WHEN nameEN = 'People''s Daily Finance' OR url LIKE '%people.com.cn%' THEN 'people-finance'
+          WHEN nameEN = 'Financial News' OR url LIKE '%financialnews.com.cn%' THEN 'financial-news'
+          WHEN nameEN = 'China Securities Journal' OR url LIKE '%cs.com.cn%' THEN 'csj'
+          WHEN nameEN = 'Shanghai Securities News' OR url LIKE '%shobserver.com%' THEN 'ssn'
+          WHEN nameEN = 'Securities Times' OR url LIKE '%stcn.com%' THEN 'stcn'
+          WHEN nameEN = 'Caixin' OR url LIKE '%caixin.com%' THEN 'caixin'
+          WHEN nameEN = '21st Century Business Herald' OR url LIKE '%21jingji.com%' THEN '21jingji'
+        END IS NOT NULL;
+
+      UPDATE sources
+      SET detailSelector = '.detail-content|.detail-content-wrapper|.video-content-left'
+      WHERE id IN (
+        SELECT source_id FROM built_in_source_state WHERE seed_key = 'stcn'
+      )
+        AND COALESCE(trim(detailSelector), '') IN (
+          '',
+          '.detail-content',
+          '.detail-content|.video-content-left'
+        );
+    `
   }
 ]
 

@@ -135,9 +135,10 @@ export function BriefingDetail({ briefingId }: Props) {
   }
 
   const safeDetail = detailContent?.content
-    ? DOMPurify.sanitize(detailContent.content, {
+      ? DOMPurify.sanitize(detailContent.content, {
         USE_PROFILES: { html: true },
-        ADD_ATTR: ['referrerpolicy', 'loading', 'decoding', 'srcset', 'sizes']
+        ADD_TAGS: ['video', 'source', 'figure', 'figcaption'],
+        ADD_ATTR: ['referrerpolicy', 'loading', 'decoding', 'srcset', 'sizes', 'controls', 'poster', 'preload', 'playsinline', 'target', 'rel']
       })
     : null
   const detailError = detailContent && detailContent.status !== 'OK' ? detailContent : null
@@ -276,7 +277,7 @@ export function BriefingDetail({ briefingId }: Props) {
 
       {!isLoadingDetail && safeDetail && (
         <div
-          className="prose prose-sm max-w-none text-sm leading-relaxed text-slate-700 dark:text-slate-300"
+          className="prose prose-sm max-w-none text-sm leading-relaxed text-slate-700 dark:text-slate-300 [&_.detail-video-reference]:my-4 [&_.detail-video-reference]:overflow-hidden [&_.detail-video-reference]:rounded-md [&_.detail-video-reference]:border [&_.detail-video-reference]:border-slate-200 [&_.detail-video-reference]:bg-slate-950 [&_.detail-video-reference_video]:mx-auto [&_.detail-video-reference_video]:block [&_.detail-video-reference_video]:max-h-[560px] [&_.detail-video-reference_video]:w-full [&_.detail-video-reference_figcaption]:m-0 [&_.detail-video-reference_figcaption]:bg-white [&_.detail-video-reference_figcaption]:px-3 [&_.detail-video-reference_figcaption]:py-2 [&_.detail-video-reference_figcaption]:text-xs dark:[&_.detail-video-reference]:border-slate-700 dark:[&_.detail-video-reference_figcaption]:bg-slate-900"
           dangerouslySetInnerHTML={{ __html: safeDetail }}
         />
       )}

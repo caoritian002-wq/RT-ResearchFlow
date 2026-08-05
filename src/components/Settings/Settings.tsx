@@ -22,6 +22,36 @@ const CACHE_RANGES: { value: 'all' | '1month' | '3months' | '1year'; label: stri
 
 const DECISION_NOTIFY_PRIORITIES = [3, 4, 5] as const
 
+interface NotificationToggleProps {
+  label: string
+  description: string
+  checked: boolean
+  onChange: (checked: boolean) => void
+}
+
+export function NotificationToggle({ label, description, checked, onChange }: NotificationToggleProps) {
+  return (
+    <div className="flex min-h-16 items-center justify-between gap-4 border-b border-slate-100 py-2.5 last:border-b-0 dark:border-slate-800">
+      <div className="min-w-0">
+        <div className="text-sm font-medium text-slate-700 dark:text-slate-200">{label}</div>
+        <p className="mt-0.5 text-xs leading-5 text-slate-400 dark:text-slate-500">{description}</p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={`${checked ? '关闭' : '开启'}${label}`}
+        onClick={() => onChange(!checked)}
+        className="flex h-11 w-14 shrink-0 items-center justify-center rounded-md outline-none transition-colors hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-cyan-500/40 dark:hover:bg-slate-800"
+      >
+        <span className={`relative h-6 w-11 rounded-full transition-colors motion-reduce:transition-none ${checked ? 'bg-cyan-600' : 'bg-slate-300 dark:bg-slate-700'}`}>
+          <span aria-hidden="true" className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform motion-reduce:transition-none ${checked ? 'translate-x-5' : 'translate-x-0'}`} />
+        </span>
+      </button>
+    </div>
+  )
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -206,27 +236,25 @@ export function Settings() {
         <span className="ml-2 text-sm text-gray-500 dark:text-gray-400">分钟</span>
       </section>
 
-      {/* FR-167: 今日看板 Windows 原生通知 */}
+      {/* FR-167/260: 高优先级资讯应用内提醒与 Windows 决策信号通知 */}
       <section className="mb-6 border-t border-gray-100 dark:border-gray-700 pt-6">
-        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">今日看板系统通知</label>
+        <h3 className="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">高优先级资讯提醒</h3>
         <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">
-          新增高优先级信号时弹出 Windows 原生通知；同一信号去重更新不会重复弹出。
+          用户无论停留在哪个模块，都能收到达到设定优先级的资讯提醒；点击后直接打开对应文章，不会自动发起 AI 分析。
         </p>
-        <div className="flex gap-2 mb-3">
-          {([{ value: 1, label: '开启' }, { value: 0, label: '关闭' }] as const).map(({ value, label }) => (
-            <button
-              key={value}
-              onClick={() => updateSettings({ decision_notify_windows_enabled: value })}
-              className={[
-                'px-3 py-1.5 rounded border text-sm transition-colors',
-                (settings.decision_notify_windows_enabled ?? 0) === value
-                  ? 'bg-blue-500 text-white border-blue-500'
-                  : 'border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
-              ].join(' ')}
-            >
-              {label}
-            </button>
-          ))}
+        <div className="mb-3 border-y border-slate-100 dark:border-slate-800">
+          <NotificationToggle
+            label="应用内主动提醒"
+            description="在右下角展示可点击的高优先级资讯提醒。"
+            checked={(settings.decision_notify_in_app_enabled ?? 1) === 1}
+            onChange={(checked) => { void updateSettings({ decision_notify_in_app_enabled: checked ? 1 : 0 }) }}
+          />
+          <NotificationToggle
+            label="Windows 系统通知"
+            description="应用最小化或被其他窗口遮挡时，由 Windows 通知中心提示。"
+            checked={(settings.decision_notify_windows_enabled ?? 0) === 1}
+            onChange={(checked) => { void updateSettings({ decision_notify_windows_enabled: checked ? 1 : 0 }) }}
+          />
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-sm text-gray-600 dark:text-gray-400">最低优先级</span>
@@ -234,12 +262,12 @@ export function Settings() {
             <button
               key={priority}
               onClick={() => updateSettings({ decision_notify_min_priority: priority })}
-              disabled={(settings.decision_notify_windows_enabled ?? 0) !== 1}
+              disabled={(settings.decision_notify_in_app_enabled ?? 1) !== 1 && (settings.decision_notify_windows_enabled ?? 0) !== 1}
               className={[
-                'px-3 py-1.5 rounded border text-sm transition-colors disabled:opacity-40',
+                'min-h-11 rounded-md border px-3 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-cyan-500 motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-40',
                 (settings.decision_notify_min_priority ?? 4) === priority
-                  ? 'bg-orange-500 text-white border-orange-500'
-                  : 'border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
+                  ? 'border-cyan-600 bg-cyan-600 text-white dark:border-cyan-400 dark:bg-cyan-400 dark:text-slate-950'
+                  : 'border-gray-200 text-gray-700 hover:border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:border-gray-500 dark:hover:bg-gray-800'
               ].join(' ')}
             >
               P{priority}+

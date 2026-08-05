@@ -1133,6 +1133,7 @@ export interface AppSettingsRow {
   sector_concept_source?: string      // FR-157: 板块资金流向题材源（'kpl'|'ths'|'dc'，默认 'ths'）
   decision_notify_windows_enabled?: number // FR-167: Windows 原生通知开关，0/1
   decision_notify_min_priority?: number    // FR-167: Windows 原生通知最低优先级，默认 4
+  decision_notify_in_app_enabled?: number  // FR-260: 应用内主动提醒开关，0/1，默认 1
   supply_chain_llm_fallback?: number       // FR-171: 产业链传导分析 LLM 兜底开关，0=关，1=开
   decision_center_filters_json?: string | null // FR-241: 今日看板筛选的跨 renderer-origin 持久偏好
 }

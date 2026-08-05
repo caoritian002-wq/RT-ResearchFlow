@@ -36,6 +36,14 @@ import {
 import { AppConfirmDialog } from './components/shared/AppConfirmDialog'
 import { AppToast, type AppToastTone } from './components/shared/AppToast'
 import { subscribeAppToast } from './components/shared/appToastBus'
+import { DecisionSignalToast } from './components/DecisionSignalToast/DecisionSignalToast'
+import {
+  buildDecisionSignalToastBatch,
+  parseDecisionSignalBriefingId,
+  shouldShowDecisionSignalToast,
+  type DecisionSignalToastBatch,
+  type DecisionSignalToastSignal,
+} from './components/DecisionSignalToast/decisionSignalToastModel'
 
 const AIAnalysis = lazy(() => import('./components/AIAnalysis/AIAnalysis').then((module) => ({ default: module.AIAnalysis })))
 const DeepResearchWorkbench = lazy(() => import('./components/AIAnalysis/DeepResearchWorkbench').then((module) => ({ default: module.DeepResearchWorkbench })))
@@ -184,6 +192,10 @@ export default function App() {
   const [startupBacktestSyncing, setStartupBacktestSyncing] = useState(false)
   const [startupBacktestError, setStartupBacktestError] = useState<string | null>(null)
   const [appToast, setAppToast] = useState<{ message: string; tone: AppToastTone } | null>(null)
+  const [decisionSignalToast, setDecisionSignalToast] = useState<DecisionSignalToastBatch | null>(null)
+  const [decisionSignalToastKey, setDecisionSignalToastKey] = useState(0)
+  const decisionSignalBufferRef = useRef<DecisionSignalToastSignal[]>([])
+  const decisionSignalAggregationTimerRef = useRef<number | null>(null)
   const industryResearchStageProgress = industryResearchTask
     ? buildResearchStageProgress({
         status: industryResearchTask.status,
@@ -216,6 +228,7 @@ export default function App() {
     handleNewBriefings,
     updateSourceProgress,
     setAIPendingAnalysis,
+    aiProgress,
     setAiProgress,
     activeTab,
     setActiveTab,
@@ -235,6 +248,7 @@ export default function App() {
     setAIAnalysisSubTab,
     clearPendingResearchDiscussion,
     navigateToIndustryResearch,
+    navigateToBriefing,
     openPremarketScenario
   } = useAppStore()
   const navShellRef = useRef<HTMLDivElement>(null)
@@ -562,8 +576,19 @@ export default function App() {
     const offAiProgress = window.api.ai.onAnalyzeProgress((data) => {
       setAiProgress(data)
     })
-    const offDecisionSignal = window.api.decision.onSignalCreated(() => {
-      loadDecisionSignalSummary()
+    const offDecisionSignal = window.api.decision.onSignalCreated((signal) => {
+      void loadDecisionSignalSummary()
+      if (!shouldShowDecisionSignalToast(signal, settings)) return
+      decisionSignalBufferRef.current.push(signal)
+      if (decisionSignalAggregationTimerRef.current !== null) return
+      decisionSignalAggregationTimerRef.current = window.setTimeout(() => {
+        const notice = buildDecisionSignalToastBatch(decisionSignalBufferRef.current)
+        decisionSignalBufferRef.current = []
+        decisionSignalAggregationTimerRef.current = null
+        if (!notice) return
+        setDecisionSignalToastKey((current) => current + 1)
+        setDecisionSignalToast(notice)
+      }, 250)
     })
 
     return () => {
@@ -575,8 +600,23 @@ export default function App() {
       offAiAvailable()
       offAiProgress()
       offDecisionSignal()
+      if (decisionSignalAggregationTimerRef.current !== null) {
+        window.clearTimeout(decisionSignalAggregationTimerRef.current)
+        decisionSignalAggregationTimerRef.current = null
+      }
+      decisionSignalBufferRef.current = []
     }
-  }, [settings?.autoAiAnalysisPrompt])
+  }, [
+    settings?.autoAiAnalysisPrompt,
+    settings?.decision_notify_in_app_enabled,
+    settings?.decision_notify_min_priority,
+  ])
+
+  function openDecisionSignalNotice(signal: DecisionSignalToastSignal): void {
+    setDecisionSignalToast(null)
+    const briefingId = parseDecisionSignalBriefingId(signal)
+    if (briefingId !== null) navigateToBriefing(briefingId)
+  }
 
   const NAV_TABS: Array<{ tab: Tab; label: string; icon: PrimaryNavigationIconName }> = [
     { tab: 'decision-center', label: '今日看板', icon: 'dashboard' },
@@ -792,6 +832,13 @@ export default function App() {
         tone={appToast?.tone}
         testId="app-global-toast"
         onClose={() => setAppToast(null)}
+      />
+      <DecisionSignalToast
+        notice={decisionSignalToast}
+        noticeKey={decisionSignalToastKey}
+        raised={aiProgress != null}
+        onOpen={openDecisionSignalNotice}
+        onClose={() => setDecisionSignalToast(null)}
       />
       <AppConfirmDialog
         open={startupBacktestSync != null}

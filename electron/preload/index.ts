@@ -3405,8 +3405,9 @@ const api = {
         message?: string
       }>,
     onSignalCreated: (cb: (signal: DecisionSignalItem) => void) => {
-      ipcRenderer.on('decision:signalCreated', (_e, d) => cb(d))
-      return () => { ipcRenderer.removeAllListeners('decision:signalCreated') }
+      const listener = (_event: IpcRendererEvent, signal: DecisionSignalItem) => cb(signal)
+      ipcRenderer.on('decision:signalCreated', listener)
+      return () => { ipcRenderer.removeListener('decision:signalCreated', listener) }
     },
   },
 

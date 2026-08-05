@@ -1,6 +1,5 @@
 import { ipcMain, net } from 'electron'
 import { fetchWithBrowser } from '../services/scrapers/browserFetch'
-import * as cheerio from 'cheerio'
 import { sha256 } from '../utils/hashUtils'
 import {
   getCachedDetail,
@@ -10,6 +9,10 @@ import {
 } from '../database/detailCacheRepository'
 import { getDb } from '../database/db'
 import type { BriefingRow, SourceRow } from '../database/types'
+import {
+  extractDetailContent,
+  normalizeDetailContentHtml,
+} from '../services/detailContentExtraction'
 
 /**
  * Fetch a URL using Electron's net module (respects proxy settings).
@@ -92,54 +95,6 @@ function decodeChineseBuffer(buffer: Buffer, contentType: string): string {
   return buffer.toString('utf-8')
 }
 
-function resolveDetailAssetUrl(rawValue: string | undefined, baseUrl: string): string | null {
-  const value = rawValue?.trim()
-  if (!value || value.startsWith('data:') || value.startsWith('blob:')) return null
-  try {
-    return new URL(value, baseUrl).toString()
-  } catch {
-    return null
-  }
-}
-
-function normalizeSrcset(srcset: string | undefined, baseUrl: string): string | null {
-  const value = srcset?.trim()
-  if (!value) return null
-
-  const normalized = value
-    .split(',')
-    .map((part) => {
-      const trimmed = part.trim()
-      if (!trimmed) return ''
-      const [urlPart, ...descriptorParts] = trimmed.split(/\s+/)
-      const resolved = resolveDetailAssetUrl(urlPart, baseUrl)
-      return resolved ? [resolved, ...descriptorParts].join(' ') : trimmed
-    })
-    .filter(Boolean)
-    .join(', ')
-
-  return normalized || null
-}
-
-function normalizeDetailHtml(content: string, baseUrl: string): string {
-  const $ = cheerio.load(content)
-  $('img').each((_idx, img) => {
-    const el = $(img)
-    const src = el.attr('src')
-    const lazySrc = el.attr('data-src') ?? el.attr('data-original') ?? el.attr('data-lazy-src') ?? el.attr('data-url')
-    const resolvedSrc = resolveDetailAssetUrl(src, baseUrl) ?? resolveDetailAssetUrl(lazySrc, baseUrl)
-    if (resolvedSrc) el.attr('src', resolvedSrc)
-
-    const resolvedSrcset = normalizeSrcset(el.attr('srcset') ?? el.attr('data-srcset'), baseUrl)
-    if (resolvedSrcset) el.attr('srcset', resolvedSrcset)
-
-    el.attr('referrerpolicy', 'no-referrer')
-    el.attr('loading', 'lazy')
-    el.attr('decoding', 'async')
-  })
-  return $.root().html() ?? content
-}
-
 export type DetailContentResult = {
   content: string | null
   status: 'OK' | 'NO_DETAIL_SELECTOR' | 'FETCH_ERROR' | 'PARSER_ERROR' | 'NO_MATCH'
@@ -171,39 +126,23 @@ export function registerDetailHandlers(): void {
     const cached = getCachedDetail(cacheKey)
     if (cached) {
       console.log('[detail] cache hit for', briefing.originalUrl)
-      return { content: normalizeDetailHtml(cached.content, briefing.originalUrl), status: 'OK' }
+      return { content: normalizeDetailContentHtml(cached.content, briefing.originalUrl), status: 'OK' }
     }
 
     // Fetch fresh
     try {
       console.log('[detail] fetchHtml....', briefing.originalUrl)
       const html = await fetchHtml(briefing.originalUrl)
-      const $ = cheerio.load(html)
-
-      // detailSelector may be "|"-delimited; try each in order, return first match
-      const selectors = source.detailSelector.split('|').map((s) => s.trim()).filter(Boolean)
-      console.log('[detail] selectors...', selectors)
-      let extracted = ''
-      let matchedSelector: string | null = null
-      for (const sel of selectors) {
-        const found = $(sel).html()
-        if (found && found.trim()) {
-          extracted = found
-          matchedSelector = sel
-          break
-        }
-      }
+      const extracted = extractDetailContent(html, source.detailSelector, briefing.originalUrl)
 
       if (!extracted) {
         console.warn('[detail] no matching selector for', briefing.originalUrl, source.detailSelector)
-        setCachedDetail(cacheKey, briefing.originalUrl, '')
         return { content: null, status: 'NO_MATCH', error: `未能匹配选择器：${source.detailSelector}` }
       }
 
-      const normalized = normalizeDetailHtml(extracted, briefing.originalUrl)
-      console.log('[detail] extracted length:', normalized.length, 'chars, selector:', matchedSelector)
-      setCachedDetail(cacheKey, briefing.originalUrl, normalized)
-      return { content: normalized, status: 'OK' }
+      console.log('[detail] extracted length:', extracted.content.length, 'chars, selector:', extracted.matchedSelector)
+      setCachedDetail(cacheKey, briefing.originalUrl, extracted.content)
+      return { content: extracted.content, status: 'OK' }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.error('[detail] fetch failed:', briefing.originalUrl, message)
