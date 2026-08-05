@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
 import { useAppStore } from '../../store/appStore'
 import type { AISessionSummary } from '../../store/appStore'
-import MermaidBlock from '../MermaidBlock/MermaidBlock'
+import MermaidBlock, { MermaidAwarePre } from '../MermaidBlock/MermaidBlock'
 import IndustryAnalysisDrawer from '../IndustryChain/IndustryAnalysisDrawer'
 import { INDUSTRY_CHAINS } from '../../utils/industryChainData'
 import { ResearchDiscussionContextBar } from '../ResearchDiscussion/ResearchDiscussionContextBar'
@@ -59,6 +59,7 @@ function linkifyStockCodes(text: string, codes: string[]): string {
 function MarkdownComponents() {
   const navigateToStock = useAppStore((state) => state.navigateToStock)
   return {
+    pre: MermaidAwarePre,
     code({ className, children, ...props }: React.ComponentPropsWithoutRef<'code'> & { className?: string }) {
       if (className?.includes('language-mermaid')) {
         return <MermaidBlock code={String(children).replace(/\n$/, '')} />

@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
-import MermaidBlock from '../MermaidBlock/MermaidBlock'
+import MermaidBlock, { MermaidAwarePre } from '../MermaidBlock/MermaidBlock'
 import { useAppStore } from '../../store/appStore'
 import {
   LineChart,
@@ -855,6 +855,7 @@ export function ForecastPanel({ stockCode, stockName, isOpen, onClose }: Forecas
                                       remarkPlugins={[remarkGfm]}
                                       rehypePlugins={[rehypeRaw]}
                                       components={{
+                                        pre: MermaidAwarePre,
                                         code({ className, children, ...props }: React.ComponentPropsWithoutRef<'code'> & { className?: string }) {
                                           if (className?.includes('language-mermaid')) {
                                             return <MermaidBlock code={String(children).replace(/\n$/, '')} />
