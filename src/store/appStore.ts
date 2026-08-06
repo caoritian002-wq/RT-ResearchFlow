@@ -279,6 +279,7 @@ interface AppState {
 
   // Selected briefing for detail view
   selectedBriefingId: number | null
+  briefingDeepLinkId: number | null
 
   // Pagination
   currentPage: number
@@ -375,6 +376,8 @@ interface AppState {
   loadSettings: () => Promise<void>
   updateSettings: (data: Partial<Omit<AppSettingsRow, 'id'>>) => Promise<void>
   selectBriefing: (id: number | null) => void
+  navigateToBriefing: (id: number) => void
+  clearBriefingDeepLink: () => void
   loadAISessions: () => Promise<void>
   loadAIConfig: () => Promise<void>
   setAIPendingAnalysis: (data: AIPendingAnalysis | null) => void
@@ -408,6 +411,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   settings: null,
   catchUpMessage: null,
   selectedBriefingId: null,
+  briefingDeepLinkId: null,
   currentPage: 1,
   scanProgressModal: { isOpen: false, rows: [] },
   aiSessions: [],
@@ -472,7 +476,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { selectedDate, selectedRating, selectedSourceId, publicationTimeScope, searchQuery, totalCount } = get()
     const totalPages = Math.ceil(totalCount / PAGE_SIZE)
     if (page < 1 || page > totalPages) return
-    set({ isLoadingBriefings: true, currentPage: page })
+    set({ isLoadingBriefings: true, currentPage: page, selectedBriefingId: null, briefingDeepLinkId: null })
     try {
       const result = await window.api.briefings.list({
         date: selectedDate ?? undefined,
@@ -526,7 +530,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       briefings: state.briefings.map((b) =>
         b.id === id ? { ...b, isRead: true, readAt: Date.now() } : b
       ),
-      unreadCount: Math.max(0, state.unreadCount - 1)
+      unreadCount: Math.max(0, state.unreadCount - (state.briefings.some((b) => b.id === id && !b.isRead) ? 1 : 0))
     }))
     get().loadArchiveDates()
   },
@@ -548,7 +552,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setFilter: (filter) => {
-    set(filter)
+    set({ ...filter, selectedBriefingId: null, briefingDeepLinkId: null })
     get().loadBriefings()
   },
 
@@ -593,11 +597,29 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   selectBriefing: (id) => {
-    set({ selectedBriefingId: id })
+    set({ selectedBriefingId: id, briefingDeepLinkId: null })
     if (id !== null) {
-      get().markRead(id)
+      void get().markRead(id)
     }
   },
+
+  navigateToBriefing: (id) => {
+    if (!Number.isSafeInteger(id) || id <= 0) return
+    set({
+      activeTab: 'feed',
+      selectedBriefingId: id,
+      briefingDeepLinkId: id,
+      selectedDate: null,
+      selectedRating: null,
+      selectedSourceId: null,
+      publicationTimeScope: 'all',
+      searchQuery: '',
+    })
+    void get().loadBriefings()
+    void get().markRead(id)
+  },
+
+  clearBriefingDeepLink: () => set({ briefingDeepLinkId: null }),
 
   setActiveTab: (tab) => set({ activeTab: tab }),
   openPremarketScenario: () => set({

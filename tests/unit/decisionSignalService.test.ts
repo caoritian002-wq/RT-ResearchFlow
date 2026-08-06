@@ -101,6 +101,26 @@ function baseSignal(overrides: Partial<Parameters<typeof emitDecisionSignal>[1]>
 }
 
 describe('decisionSignalService', () => {
+  it('首次插入P3及以上信号才广播，去重更新和P2不重复推送', () => {
+    const db = createDb()
+    const send = vi.fn()
+    const win = {
+      isDestroyed: () => false,
+      webContents: { send },
+    } as never
+
+    emitDecisionSignal(db, baseSignal({ dedupKey: 'p2', priority: 2 }), win)
+    emitDecisionSignal(db, baseSignal({ dedupKey: 'p3', priority: 3 }), win)
+    emitDecisionSignal(db, baseSignal({ dedupKey: 'p3', priority: 4, summary: '去重更新' }), win)
+
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledWith('decision:signalCreated', expect.objectContaining({
+      dedupKey: 'p3',
+      priority: 3,
+    }))
+    db.close()
+  })
+
   it('按 dedupKey 去重并更新内容', () => {
     const db = createDb()
     const first = emitDecisionSignal(db, baseSignal({ summary: '第一次' }))

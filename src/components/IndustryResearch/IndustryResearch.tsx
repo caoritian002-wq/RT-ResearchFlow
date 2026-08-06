@@ -96,7 +96,6 @@ export function IndustryResearch(): React.ReactElement {
   const [pendingConfirmAction, setPendingConfirmAction] = useState<'archive' | 'delete' | null>(null)
   const [archiveImportOpen, setArchiveImportOpen] = useState(false)
   const [snapshotHistoryOpen, setSnapshotHistoryOpen] = useState(false)
-  const [snapshotCount, setSnapshotCount] = useState(0)
   const [changeRefreshToken, setChangeRefreshToken] = useState(0)
   const [projectDiscussion, setProjectDiscussion] = useState<ResearchDiscussionSummary | null>(null)
   const [decisionContext, setDecisionContext] = useState<{ view: ResearchDecisionView; companyId: string | null; securityId: string | null }>({ view: 'current', companyId: null, securityId: null })
@@ -181,10 +180,9 @@ export function IndustryResearch(): React.ReactElement {
     const requestId = ++requestIdRef.current
     setLoadingDetail(true)
     setError(null)
-    const [detailResponse, reportResponse, snapshotsResponse] = await Promise.all([
+    const [detailResponse, reportResponse] = await Promise.all([
       window.api.industryResearch.getProject(projectId) as Promise<IndustryResearchResponse<ProjectDetail>>,
       window.api.industryResearch.getReport(projectId) as Promise<IndustryResearchResponse<ResearchReport>>,
-      window.api.industryResearch.listSnapshots({ projectId, offset: 0, limit: 1 }) as Promise<IndustryResearchResponse<{ total: number }>>,
       loadGeneration(projectId),
     ])
     if (requestId !== requestIdRef.current) return
@@ -196,7 +194,6 @@ export function IndustryResearch(): React.ReactElement {
       return
     }
     setDetail(detailResponse.data)
-    setSnapshotCount(snapshotsResponse.ok && snapshotsResponse.data ? snapshotsResponse.data.total : 0)
     if (reportResponse.ok && reportResponse.data) setReport(reportResponse.data)
     else setReport(null)
   }, [loadGeneration])
@@ -260,7 +257,6 @@ export function IndustryResearch(): React.ReactElement {
       setEvidenceCandidates([])
       setCompanyCandidates([])
       setProjectDiscussion(null)
-      setSnapshotCount(0)
       setArchiveImportOpen(false)
       setSnapshotHistoryOpen(false)
       return
@@ -271,7 +267,6 @@ export function IndustryResearch(): React.ReactElement {
     setEvidenceActionId(null)
     setNotice(null)
     setProjectDiscussion(null)
-    setSnapshotCount(0)
     setArchiveImportOpen(false)
     setSnapshotHistoryOpen(false)
     void loadDetail(selectedId)
@@ -292,7 +287,7 @@ export function IndustryResearch(): React.ReactElement {
         financialCollection: (payload.financialCollection as GenerationRunView['financialCollection']) ?? current.financialCollection,
       } : current)
       if (payload.status === 'succeeded' || payload.status === 'failed' || payload.status === 'cancelled') {
-        void loadDetail(selectedId)
+        void Promise.all([loadDetail(selectedId), loadGeneration(selectedId)])
       }
     })
     return () => { stop?.() }
@@ -423,6 +418,33 @@ export function IndustryResearch(): React.ReactElement {
     }
   }, [generationRun, selectedId])
 
+  const expandCompanyCandidates = useCallback(async (): Promise<string | null> => {
+    if (!selectedId || !generationRun) return null
+    setError(null)
+    setNotice(null)
+    const response = await window.api.industryResearch.expandCompanyCandidates(
+      selectedId,
+      generationRun.id,
+    ) as IndustryResearchResponse<{
+      addedCandidates: number
+      addedProjectCompanies: number
+      totalCandidates: number
+      totalProjectCompanies: number
+      targetCompanies: number
+      projectedNodes: number
+      projectedEdges: number
+      derivedRunId: string
+      coverage: { status: string; targets: Array<{ status: string }> }
+    }>
+    if (!response.ok || !response.data) {
+      setError(responseError(response))
+      return null
+    }
+    await loadGeneration(selectedId)
+    const uncovered = response.data.coverage.targets.filter((item) => item.status === 'uncovered').length
+    return `已启动 ${response.data.targetCompanies} 家公司的完整链路补全：新增 ${response.data.addedCandidates} 条线索、${response.data.addedProjectCompanies} 家项目公司，预投影 ${response.data.projectedNodes} 个节点和 ${response.data.projectedEdges} 条关系；正在采集业务暴露与财务时间轴${uncovered ? `，仍有 ${uncovered} 个生态位待核验` : ''}`
+  }, [generationRun, loadGeneration, selectedId])
+
   const confirmEvidence = useCallback(async (candidateId: string, action: 'confirm' | 'reject') => {
     const projectId = selectedProjectRef.current
     if (!projectId || evidenceActionLockRef.current) return
@@ -543,24 +565,20 @@ export function IndustryResearch(): React.ReactElement {
 
   const askDeleteCurrent = useCallback(() => {
     if (!selectedId || !detail) return
-    if (snapshotCount > 0) {
-      setError('该项目已有不可变研究版本，只能归档，不能物理删除')
-      return
-    }
     setError(null)
     setPendingConfirmAction('delete')
     setConfirmRequest({
       title: '删除研究项目',
       description: `确认永久删除「${detail.project.title}」？`,
       details: [
-        '将删除该项目的图谱、证据、假设、生成运行和候选',
+        '将删除该项目的图谱、证据、假设、研究版本、决策账本、生成运行和候选',
         '此操作不可恢复',
-        '共享公司与财务事实会保留',
+        '共享公司、证券、财务事实、Skill快照和既有研究讨论会保留',
       ],
       confirmLabel: '永久删除',
       tone: 'danger',
     })
-  }, [detail, selectedId, snapshotCount])
+  }, [detail, selectedId])
 
   const executeConfirmAction = useCallback(async () => {
     if (!selectedId || !pendingConfirmAction) return
@@ -720,7 +738,6 @@ export function IndustryResearch(): React.ReactElement {
                 && Boolean(generationRun.reportDocument?.markdown)}
               evidenceActionId={evidenceActionId}
               changeRefreshToken={changeRefreshToken}
-              hasSnapshots={snapshotCount > 0}
               discussionLabel={projectDiscussion ? '继续讨论' : '和 AI 讨论'}
               discussionBusy={discussionStarting}
               scrollRef={workspaceScrollRef}
@@ -745,13 +762,18 @@ export function IndustryResearch(): React.ReactElement {
               onImportArchive={() => setArchiveImportOpen(true)}
               onOpenSnapshots={() => setSnapshotHistoryOpen(true)}
               onResearchChanged={handleResearchChanged}
-              onSnapshotCountChange={setSnapshotCount}
               onEditProject={() => openDialog('project-edit')}
               onArchive={askArchiveCurrent}
               onDelete={askDeleteCurrent}
               onEditGraph={() => openDialog('graph')}
               onConfirmEvidence={(candidateId, action) => void confirmEvidence(candidateId, action)}
               onResolveCompany={(candidate, action) => void resolveCompany(candidate, action)}
+              onExpandCompanies={generationRun
+                && !['queued', 'running'].includes(generationRun.status)
+                && ['companies', 'report'].includes(generationRun.lastSuccessfulStage || '')
+                ? expandCompanyCandidates
+                : undefined}
+              companyDataRevision={generationRun?.completedAt ?? null}
               decisionContext={decisionContext}
               onDecisionContextChange={setDecisionContext}
             />

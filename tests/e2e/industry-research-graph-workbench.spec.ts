@@ -23,6 +23,15 @@ function seedGraphFixture(dbPath: string): void {
     db.prepare(
       'INSERT INTO industry_research_projects (id, title, industry_name, product_scope, region_scope, time_scope, purpose, depth, status, data_as_of, source_type, source_ref, source_text_summary, skill_id, skill_content_hash, skill_rule_version, generation_model, graph_updated_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(projectId, '光通信产业传导图验收', '光通信', '光纤光缆与承载网络', '中国', '近三年', 'investment', 'standard', 'active', '2026-07-18', 'manual', null, 'E2E graph fixture', 'builtin:industry-chain-research', 'a'.repeat(64), 'sha256:aaaaaaaaaaaa', 'e2e-model', now, now, now)
+    db.prepare(
+      'INSERT INTO industry_research_generation_runs (id, project_id, research_question, status, current_stage, last_successful_stage, progress_current, progress_total, progress_message, cancel_requested, skill_id, skill_content_hash, skill_rule_version, provider, model, error_code, error_message, retryable, stage_artifacts_json, scope_json, enable_web_retrieval, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(
+      'e2e-company-coverage-run', projectId, '验证公司生态位覆盖补全入口。', 'succeeded', 'report', 'report',
+      7, 7, '研究报告已生成', 0, 'builtin:industry-chain-research', 'a'.repeat(64), 'sha256:aaaaaaaaaaaa',
+      'e2e-provider', 'e2e-model', null, null, 0,
+      JSON.stringify({ scope: { purpose: 'investment' }, map: { nodes: [], edges: [] }, companies: { items: [] } }),
+      JSON.stringify({ purpose: 'investment' }), 1, now, now, now, now,
+    )
 
     const layerSizes = [5, 4, 8, 13, 6, 3, 3, 3, 3]
     const layerNames = layerSizes.map((size, layer) => Array.from({ length: size }, (_, index) => (
@@ -366,9 +375,22 @@ test('产业研究使用真实关系图并按需打开研究账本', async () =>
     await window.keyboard.press('Escape')
     await expect(darkDetail).toHaveCount(0)
 
+    await window.setViewportSize({ width: 1680, height: 960 })
     await window.getByTestId('industry-research-view-companies').click()
     const companyFinancial = window.getByTestId('industry-research-company-financial')
     await expect(companyFinancial).toBeVisible()
+    const expandCompanies = window.getByTestId('industry-research-expand-companies')
+    await expect(expandCompanies).toBeVisible()
+    await expect(expandCompanies).toBeEnabled()
+    const [viewport, companyListBox, expandBox] = await Promise.all([
+      window.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })),
+      window.getByTestId('industry-research-company-list').boundingBox(),
+      expandCompanies.boundingBox(),
+    ])
+    expect(viewport.width).toBeGreaterThanOrEqual(1600)
+    expect(viewport.height).toBeGreaterThanOrEqual(880)
+    expect(Math.round(expandBox?.height ?? 0)).toBe(32)
+    expect((expandBox?.x ?? 0) + (expandBox?.width ?? 0)).toBeLessThanOrEqual((companyListBox?.x ?? 0) + (companyListBox?.width ?? 0))
     const highScoreCompany = window.getByTestId('industry-research-company-company:score-high')
     const lowScoreCompany = window.getByTestId('industry-research-company-company:score-low')
     const unknownScoreCompany = window.getByTestId('industry-research-company-company:score-unknown')

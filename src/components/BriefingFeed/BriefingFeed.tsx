@@ -16,12 +16,14 @@ export function BriefingFeed() {
     totalCount,
     isLoadingBriefings,
     selectedBriefingId,
+    briefingDeepLinkId,
     selectedDate,
     selectedSourceId,
     publicationTimeScope,
     briefingSourceStats,
     currentPage,
     selectBriefing,
+    clearBriefingDeepLink,
     setFilter,
     goToPage,
     markAllRead
@@ -42,9 +44,13 @@ export function BriefingFeed() {
 
   useEffect(() => {
     if (sortedBriefings.length === 0) return
+    if (briefingDeepLinkId != null && selectedBriefingId === briefingDeepLinkId) {
+      if (sortedBriefings.some(briefing => briefing.id === briefingDeepLinkId)) clearBriefingDeepLink()
+      return
+    }
     if (selectedBriefingId && sortedBriefings.some(briefing => briefing.id === selectedBriefingId)) return
     selectBriefing(sortedBriefings[0].id)
-  }, [selectBriefing, selectedBriefingId, sortedBriefings])
+  }, [briefingDeepLinkId, clearBriefingDeepLink, selectBriefing, selectedBriefingId, sortedBriefings])
 
   return (
     <>

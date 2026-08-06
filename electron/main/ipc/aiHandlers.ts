@@ -1,6 +1,5 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import type Database from 'better-sqlite3'
-import * as cheerio from 'cheerio'
 import { getDb } from '../database/db'
 import { getAIConfig, updateAIConfig, getProviderConfig, setProviderConfig, getAllProviderConfigs, getConfiguredProviders } from '../database/aiConfigRepository'
 import {
@@ -49,6 +48,7 @@ import { insertForecast, listForecasts, getForecast, deleteForecast, deleteForec
 import { getCachedDetail, setCachedDetail } from '../database/detailCacheRepository'
 import { sha256 } from '../utils/hashUtils'
 import { fetchHtml } from './detailHandlers'
+import { detailContentToText, extractDetailContent } from '../services/detailContentExtraction'
 import { getStockMinuteByDate, upsertStockMinute } from '../database/stockMinuteCacheRepository'
 import { runStockBasicSyncJob, subscribeStockMinute, unsubscribeStockMinute } from '../services/schedulerService'
 import { searchByNameOrCode, countAll as countStockBasic } from '../database/stockBasicCacheRepository'
@@ -219,21 +219,16 @@ async function fetchBriefingContent(briefingId: number): Promise<{ url: string; 
 
   const cacheKey = sha256(url)
   const cached = getCachedDetail(cacheKey)
-  if (cached) return { url, content: cached.content }
+  if (cached) return { url, content: detailContentToText(cached.content) }
 
   if (!source?.detailSelector) return { url, content: null }
 
   try {
     const html = await fetchHtml(url)
-    const $ = cheerio.load(html)
-    const selectors = source.detailSelector.split('|').map((s) => s.trim()).filter(Boolean)
-    let extracted = ''
-    for (const sel of selectors) {
-      const found = $(sel).text()
-      if (found && found.trim()) { extracted = found.trim(); break }
-    }
-    if (extracted) setCachedDetail(cacheKey, url, extracted)
-    return { url, content: extracted || null }
+    const extracted = extractDetailContent(html, source.detailSelector, url)
+    if (!extracted) return { url, content: null }
+    setCachedDetail(cacheKey, url, extracted.content)
+    return { url, content: detailContentToText(extracted.content) }
   } catch {
     return { url, content: null }
   }

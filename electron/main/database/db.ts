@@ -4336,6 +4336,227 @@ const MIGRATIONS: DatabaseMigration[] = [
         BEFORE DELETE ON premarket_fact_snapshots
         BEGIN SELECT RAISE(ABORT, 'PREMARKET_FACT_SNAPSHOT_IMMUTABLE'); END;
     `
+  },
+  {
+    // FR-260: 应用内决策信号提醒与 Windows 原生通知独立开关
+    version: 133,
+    sql: `
+      ALTER TABLE app_settings
+        ADD COLUMN decision_notify_in_app_enabled INTEGER NOT NULL DEFAULT 1
+        CHECK (decision_notify_in_app_enabled IN (0, 1));
+    `
+  },
+  {
+    // Built-in source defaults remain upgradeable until the user saves local overrides.
+    version: 134,
+    sql: `
+      CREATE TABLE built_in_source_state (
+        source_id            INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+        seed_key             TEXT NOT NULL UNIQUE CHECK (length(trim(seed_key)) BETWEEN 1 AND 80),
+        has_local_overrides  INTEGER NOT NULL DEFAULT 0
+          CHECK (has_local_overrides IN (0, 1))
+      );
+
+      INSERT OR IGNORE INTO built_in_source_state (source_id, seed_key, has_local_overrides)
+      SELECT
+        id,
+        CASE
+          WHEN nameEN = 'CSRC' OR url LIKE '%csrc.gov.cn%' THEN 'csrc'
+          WHEN nameEN = 'PBOC' OR url LIKE '%pbc.gov.cn%' THEN 'pboc'
+          WHEN nameEN = 'NDRC' OR url LIKE '%ndrc.gov.cn%' THEN 'ndrc'
+          WHEN nameEN = 'MOFCOM' OR url LIKE '%mofcom.gov.cn%' THEN 'mofcom'
+          WHEN nameEN = 'NBS' OR url LIKE '%stats.gov.cn%' THEN 'nbs'
+          WHEN nameEN = 'MOF' OR url LIKE '%mof.gov.cn%' THEN 'mof'
+          WHEN nameEN = 'State Council' OR url LIKE '%gov.cn%' THEN 'state-council'
+          WHEN nameEN = 'Xinhua Finance' OR url LIKE '%xinhuanet.com%' THEN 'xinhua-finance'
+          WHEN nameEN = 'People''s Daily Finance' OR url LIKE '%people.com.cn%' THEN 'people-finance'
+          WHEN nameEN = 'Financial News' OR url LIKE '%financialnews.com.cn%' THEN 'financial-news'
+          WHEN nameEN = 'China Securities Journal' OR url LIKE '%cs.com.cn%' THEN 'csj'
+          WHEN nameEN = 'Shanghai Securities News' OR url LIKE '%shobserver.com%' THEN 'ssn'
+          WHEN nameEN = 'Securities Times' OR url LIKE '%stcn.com%' THEN 'stcn'
+          WHEN nameEN = 'Caixin' OR url LIKE '%caixin.com%' THEN 'caixin'
+          WHEN nameEN = '21st Century Business Herald' OR url LIKE '%21jingji.com%' THEN '21jingji'
+        END,
+        1
+      FROM sources
+      WHERE isBuiltIn = 1
+        AND CASE
+          WHEN nameEN = 'CSRC' OR url LIKE '%csrc.gov.cn%' THEN 'csrc'
+          WHEN nameEN = 'PBOC' OR url LIKE '%pbc.gov.cn%' THEN 'pboc'
+          WHEN nameEN = 'NDRC' OR url LIKE '%ndrc.gov.cn%' THEN 'ndrc'
+          WHEN nameEN = 'MOFCOM' OR url LIKE '%mofcom.gov.cn%' THEN 'mofcom'
+          WHEN nameEN = 'NBS' OR url LIKE '%stats.gov.cn%' THEN 'nbs'
+          WHEN nameEN = 'MOF' OR url LIKE '%mof.gov.cn%' THEN 'mof'
+          WHEN nameEN = 'State Council' OR url LIKE '%gov.cn%' THEN 'state-council'
+          WHEN nameEN = 'Xinhua Finance' OR url LIKE '%xinhuanet.com%' THEN 'xinhua-finance'
+          WHEN nameEN = 'People''s Daily Finance' OR url LIKE '%people.com.cn%' THEN 'people-finance'
+          WHEN nameEN = 'Financial News' OR url LIKE '%financialnews.com.cn%' THEN 'financial-news'
+          WHEN nameEN = 'China Securities Journal' OR url LIKE '%cs.com.cn%' THEN 'csj'
+          WHEN nameEN = 'Shanghai Securities News' OR url LIKE '%shobserver.com%' THEN 'ssn'
+          WHEN nameEN = 'Securities Times' OR url LIKE '%stcn.com%' THEN 'stcn'
+          WHEN nameEN = 'Caixin' OR url LIKE '%caixin.com%' THEN 'caixin'
+          WHEN nameEN = '21st Century Business Herald' OR url LIKE '%21jingji.com%' THEN '21jingji'
+        END IS NOT NULL;
+
+      UPDATE sources
+      SET detailSelector = '.detail-content|.detail-content-wrapper|.video-content-left'
+      WHERE id IN (
+        SELECT source_id FROM built_in_source_state WHERE seed_key = 'stcn'
+      )
+        AND COALESCE(trim(detailSelector), '') IN (
+          '',
+          '.detail-content',
+          '.detail-content|.video-content-left'
+        );
+    `
+  },
+  {
+    // FR-230: immutable research facts remain protected except inside an explicit project purge transaction.
+    version: 135,
+    sql: `
+      CREATE TABLE industry_research_project_delete_context (
+        project_id TEXT PRIMARY KEY,
+        started_at INTEGER NOT NULL CHECK (started_at > 0)
+      );
+
+      DROP TRIGGER industry_research_snapshots_no_delete;
+      CREATE TRIGGER industry_research_snapshots_no_delete
+        BEFORE DELETE ON industry_research_snapshots
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_SNAPSHOT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_skill_adoptions_no_delete;
+      CREATE TRIGGER industry_research_skill_adoptions_no_delete
+        BEFORE DELETE ON industry_research_skill_adoption_events
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_work_items_no_delete;
+      CREATE TRIGGER industry_research_work_items_no_delete
+        BEFORE DELETE ON industry_research_work_item_versions
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_scenario_sets_no_delete;
+      CREATE TRIGGER industry_research_scenario_sets_no_delete
+        BEFORE DELETE ON industry_research_scenario_set_versions
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_scenarios_no_delete;
+      CREATE TRIGGER industry_research_scenarios_no_delete
+        BEFORE DELETE ON industry_research_scenarios
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM industry_research_project_delete_context AS delete_context
+          INNER JOIN industry_research_scenario_set_versions AS scenario_set
+            ON scenario_set.project_id = delete_context.project_id
+          WHERE scenario_set.id = OLD.scenario_set_version_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_decisions_no_delete;
+      CREATE TRIGGER industry_research_decisions_no_delete
+        BEFORE DELETE ON industry_research_decisions
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_monitoring_items_no_delete;
+      CREATE TRIGGER industry_research_monitoring_items_no_delete
+        BEFORE DELETE ON industry_research_monitoring_item_versions
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_monitoring_observations_no_delete;
+      CREATE TRIGGER industry_research_monitoring_observations_no_delete
+        BEFORE DELETE ON industry_research_monitoring_observations
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_trigger_versions_no_delete;
+      CREATE TRIGGER industry_research_trigger_versions_no_delete
+        BEFORE DELETE ON industry_research_decision_trigger_versions
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_trigger_evaluations_no_delete;
+      CREATE TRIGGER industry_research_trigger_evaluations_no_delete
+        BEFORE DELETE ON industry_research_decision_trigger_evaluations
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_decision_events_no_delete;
+      CREATE TRIGGER industry_research_decision_events_no_delete
+        BEFORE DELETE ON industry_research_decision_events
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_review_events_no_delete;
+      CREATE TRIGGER industry_research_review_events_no_delete
+        BEFORE DELETE ON industry_research_review_events
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_market_sync_runs_no_delete;
+      CREATE TRIGGER industry_research_market_sync_runs_no_delete
+        BEFORE DELETE ON industry_research_market_sync_runs
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_market_snapshots_no_delete;
+      CREATE TRIGGER industry_research_market_snapshots_no_delete
+        BEFORE DELETE ON industry_research_market_snapshots
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_valuation_snapshots_no_delete;
+      CREATE TRIGGER industry_research_valuation_snapshots_no_delete
+        BEFORE DELETE ON industry_research_valuation_snapshots
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+    `
   }
 ]
 

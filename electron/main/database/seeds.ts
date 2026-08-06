@@ -1,11 +1,10 @@
-import type { SourceRow } from './types'
-
-type SeedSource = Omit<SourceRow, 'id' | 'lastScannedAt' | 'successRate'>
+import type { BuiltInSourceSeed } from './sourceRepository'
 
 
-export const BUILT_IN_SOURCES: SeedSource[] = [
+export const BUILT_IN_SOURCES: BuiltInSourceSeed[] = [
   // ── 监管机构 REGULATOR ──────────────────────────────────
   {
+    seedKey: 'csrc',
     nameCN: '中国证监会',
     nameEN: 'CSRC',
     url: 'http://www.csrc.gov.cn',
@@ -21,6 +20,7 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     detailSelector: '.detail-news'
   },
   {
+    seedKey: 'pboc',
     nameCN: '中国人民银行',
     nameEN: 'PBOC',
     url: 'https://www.pbc.gov.cn',
@@ -36,6 +36,7 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     detailSelector: ".portlet"
   },
   {
+    seedKey: 'ndrc',
     nameCN: '国家发展和改革委员会',
     nameEN: 'NDRC',
     url: 'https://www.ndrc.gov.cn',
@@ -48,9 +49,10 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     parseStrategy: 'HTML_SCRAPE',
     contentSelector: ".news.tabmenu ul li a",
     financeSectionFilter: '',
-    detailSelector: null
+    detailSelector: '.article_l'
   },
   {
+    seedKey: 'mofcom',
     nameCN: '商务部',
     nameEN: 'MOFCOM',
     url: 'http://www.mofcom.gov.cn',
@@ -66,6 +68,7 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     detailSelector: null
   },
   {
+    seedKey: 'nbs',
     nameCN: '国家统计局',
     nameEN: 'NBS',
     url: 'http://www.stats.gov.cn',
@@ -78,9 +81,10 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     parseStrategy: 'HTML_SCRAPE',
     contentSelector: ".wrapper-content1-right-list ul li a",
     financeSectionFilter: '',
-    detailSelector: null
+    detailSelector: '#detail'
   },
   {
+    seedKey: 'mof',
     nameCN: '财政部',
     nameEN: 'MOF',
     url: 'http://www.mof.gov.cn',
@@ -96,6 +100,7 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     detailSelector: null
   },
   {
+    seedKey: 'state-council',
     nameCN: '国务院',
     nameEN: 'State Council',
     url: 'https://www.gov.cn',
@@ -112,6 +117,7 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
   },
   // ── 官方媒体 STATE_MEDIA ─────────────────────────────────
   {
+    seedKey: 'xinhua-finance',
     nameCN: '新华社财经',
     nameEN: 'Xinhua Finance',
     url: 'http://www.xinhuanet.com/finance/',
@@ -124,9 +130,10 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     parseStrategy: 'HTML_SCRAPE',
     contentSelector: ".part2_l .part2_b .picTit a, .part2_r .list-style2 ul li a",
     financeSectionFilter: null,
-    detailSelector: null
+    detailSelector: '#detail'
   },
   {
+    seedKey: 'people-finance',
     nameCN: '人民日报财经',
     nameEN: "People's Daily Finance",
     url: 'http://finance.people.com.cn',
@@ -139,9 +146,10 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     parseStrategy: 'HTML_SCRAPE',
     contentSelector: ".news_box ul li a",
     financeSectionFilter: null,
-    detailSelector: null
+    detailSelector: '.col.col-1.fl'
   },
   {
+    seedKey: 'financial-news',
     nameCN: '中国金融时报',
     nameEN: 'Financial News',
     url: 'http://www.financialnews.com.cn',
@@ -158,6 +166,7 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
   },
   // ── 金融媒体 FINANCIAL_PRESS ─────────────────────────────
   {
+    seedKey: 'csj',
     nameCN: '中国证券报',
     nameEN: 'China Securities Journal',
     url: 'http://www.cs.com.cn',
@@ -173,6 +182,7 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     detailSelector: null
   },
   {
+    seedKey: 'ssn',
     nameCN: '上海证券报',
     nameEN: 'Shanghai Securities News',
     url: 'https://www.shobserver.com',
@@ -188,6 +198,7 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     detailSelector: null
   },
   {
+    seedKey: 'stcn',
     nameCN: '证券时报',
     nameEN: 'Securities Times',
     url: 'https://www.stcn.com',
@@ -200,9 +211,10 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     parseStrategy: 'HTML_SCRAPE',
     contentSelector: '.box-content ul li a,.top-news a,.cc-list a',
     financeSectionFilter: null,
-    detailSelector: '.detail-content'
+    detailSelector: '.detail-content|.detail-content-wrapper|.video-content-left'
   },
   {
+    seedKey: 'caixin',
     nameCN: '财新网',
     nameEN: 'Caixin',
     url: 'https://finance.caixin.com/',
@@ -215,9 +227,10 @@ export const BUILT_IN_SOURCES: SeedSource[] = [
     parseStrategy: 'HTML_SCRAPE',
     contentSelector: "#listArticle a",
     financeSectionFilter: null,
-    detailSelector: null
+    detailSelector: '#the_content'
   },
   {
+    seedKey: '21jingji',
     nameCN: "21世纪经济报道",
     nameEN: "21st Century Business Herald",
     url: "https://www.21jingji.com",

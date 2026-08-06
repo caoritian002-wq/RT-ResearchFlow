@@ -1,6 +1,10 @@
 import { getDb } from './db'
 import type { Source, SourceRow, SourceStatus, ParseStrategy, SourceCategory } from './types'
 
+export type BuiltInSourceSeed = Omit<SourceRow, 'id' | 'lastScannedAt' | 'successRate'> & {
+  seedKey: string
+}
+
 function rowToSource(row: SourceRow): Source {
   return {
     ...row,
@@ -123,7 +127,15 @@ export function updateSource(
 
   if (fields.length === 0) return getSourceById(id)
 
-  db.prepare(`UPDATE sources SET ${fields.join(', ')} WHERE id = ?`).run([...values, id])
+  const save = db.transaction(() => {
+    db.prepare(`UPDATE sources SET ${fields.join(', ')} WHERE id = ?`).run([...values, id])
+    db.prepare(
+      `UPDATE built_in_source_state
+       SET has_local_overrides = 1
+       WHERE source_id = ?`
+    ).run(id)
+  })
+  save()
   return getSourceById(id)
 }
 
@@ -134,10 +146,15 @@ export function deleteCustomSource(id: number): boolean {
   return result.changes > 0
 }
 
-export function seedBuiltInSources(sources: Omit<SourceRow, 'id' | 'lastScannedAt' | 'successRate'>[]): void {
+export function seedBuiltInSources(sources: BuiltInSourceSeed[]): void {
   const db = getDb()
 
-  const checkByUrl  = db.prepare('SELECT id FROM sources WHERE url = ?')
+  const checkBySeedKey = db.prepare(
+    `SELECT source_id AS id, has_local_overrides AS hasLocalOverrides
+     FROM built_in_source_state
+     WHERE seed_key = ?`
+  )
+  const checkByUrl = db.prepare('SELECT id FROM sources WHERE url = ? AND isBuiltIn = 1 LIMIT 1')
   const checkByName = db.prepare('SELECT id FROM sources WHERE nameCN = ? AND isBuiltIn = 1 LIMIT 1')
 
   const insert = db.prepare(
@@ -151,43 +168,45 @@ export function seedBuiltInSources(sources: Omit<SourceRow, 'id' | 'lastScannedA
        @parseStrategy, @contentSelector, @financeSectionFilter, @detailSelector)`
   )
 
-  // Update scraping-related fields for existing built-in sources so changes
-  // to seeds.ts (e.g. adding detailSelector or a changed URL) take effect without wiping the DB.
-  const updateByUrl = db.prepare(
+  // Untouched built-ins follow shipped defaults. Saving a source switches it
+  // to local ownership so later startups cannot overwrite user configuration.
+  const updateDefaults = db.prepare(
     `UPDATE sources SET
        nameCN = @nameCN, nameEN = @nameEN,
-       feedUrl = @feedUrl, category = @category,
+       url = @url, feedUrl = @feedUrl, category = @category,
        authorityWeight = @authorityWeight, parseStrategy = @parseStrategy,
        contentSelector = @contentSelector,
        financeSectionFilter = @financeSectionFilter,
        detailSelector = @detailSelector
-     WHERE url = @url AND isBuiltIn = 1`
+     WHERE id = @id AND isBuiltIn = 1`
   )
 
-  // Fallback: source existed with a different URL — update URL too so it stays a single row
-  const updateByName = db.prepare(
-    `UPDATE sources SET
-       url = @url, nameEN = @nameEN,
-       feedUrl = @feedUrl, category = @category,
-       authorityWeight = @authorityWeight, parseStrategy = @parseStrategy,
-       contentSelector = @contentSelector,
-       financeSectionFilter = @financeSectionFilter,
-       detailSelector = @detailSelector
-     WHERE nameCN = @nameCN AND isBuiltIn = 1`
+  // The stable key keeps identity intact even if a user changes the source URL or name.
+  const linkState = db.prepare(
+    `INSERT OR IGNORE INTO built_in_source_state
+       (source_id, seed_key, has_local_overrides)
+     VALUES (?, ?, ?)`
   )
 
   const upsertMany = db.transaction((rows: typeof sources) => {
     for (const row of rows) {
-      const existingByUrl = checkByUrl.get(row.url) as { id: number } | undefined
-      if (existingByUrl) {
-        updateByUrl.run(row)
+      const { seedKey, ...defaults } = row
+      const linked = checkBySeedKey.get(seedKey) as {
+        id: number
+        hasLocalOverrides: number
+      } | undefined
+      if (linked) {
+        if (linked.hasLocalOverrides === 0) updateDefaults.run({ ...defaults, id: linked.id })
       } else {
-        const existingByName = checkByName.get(row.nameCN) as { id: number } | undefined
-        if (existingByName) {
-          // URL changed in seeds.ts — update the existing row's URL and fields
-          updateByName.run(row)
+        const existing = (checkByUrl.get(row.url) ?? checkByName.get(row.nameCN)) as {
+          id: number
+        } | undefined
+        if (existing) {
+          // Legacy rows without identity state are assumed to contain local configuration.
+          linkState.run(existing.id, seedKey, 1)
         } else {
-          insert.run(row)
+          const result = insert.run(defaults)
+          linkState.run(Number(result.lastInsertRowid), seedKey, 0)
         }
       }
     }

@@ -91,8 +91,8 @@ export function ResearchCleanupDialog({ open, onClose, onChanged }: Props): Reac
       title: '删除所选研究项目',
       description: `确认永久删除选中的 ${projectIds.length} 个研究项目？此操作不可恢复。`,
       details: [
-        '将删除项目级图谱、证据、假设、生成运行和候选',
-        '共享公司、证券与财务事实会保留',
+        '将删除项目级图谱、证据、假设、研究版本、决策账本、生成运行和候选',
+        '共享公司、证券、财务事实、Skill快照和既有研究讨论会保留',
       ],
       confirmLabel: '永久删除',
       tone: 'danger',
@@ -145,7 +145,7 @@ export function ResearchCleanupDialog({ open, onClose, onChanged }: Props): Reac
             <div>
               <h2 className="text-base font-semibold">清理产业研究</h2>
               <p className="mt-1 text-xs leading-5 text-slate-500">
-                永久删除项目级图谱、证据、假设、生成运行和候选。共享公司、证券与财务事实会保留。
+                永久删除项目自己的研究版本与全部项目级数据。共享公司、证券、财务事实、Skill快照和既有研究讨论会保留。
               </p>
             </div>
             <button type="button" onClick={onClose} className="rounded-md border border-slate-300 px-2.5 py-1 text-xs dark:border-slate-700">关闭</button>

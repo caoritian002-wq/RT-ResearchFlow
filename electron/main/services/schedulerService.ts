@@ -46,7 +46,10 @@ import { cleanupChipsCache } from '../database/cyqChipsCacheRepository'
 import { cleanupCyqPerfCache } from '../database/cyqPerfCacheRepository'
 import { cleanupTopInstDaily } from '../database/topInstDailyRepository'
 import { cleanupFactorCache } from '../database/stkFactorCacheRepository'
-import { clearAllAndInsert as clearAndInsertStockBasic } from '../database/stockBasicCacheRepository'
+import {
+  clearAllAndInsert as clearAndInsertStockBasic,
+  isStockBasicCacheStale,
+} from '../database/stockBasicCacheRepository'
 import { cleanupScreenerResults } from '../database/stockScreenerResultsRepository'
 import { getDataSourceConfig } from '../database/dataSourceRepository'
 import { decryptApiKey } from '../utils/apiKeyEncryption'
@@ -139,6 +142,7 @@ let _premarketNotification929Timer: ReturnType<typeof setTimeout> | null = null
 let _activeMinuteSubscription: { stockCode: string; intervalId: ReturnType<typeof setInterval> | null } | null = null
 let _consecutiveMinuteFailCount = 0
 let _afterCloseRunPromise: Promise<AfterCloseSyncRun> | null = null
+let _stockBasicSyncPromise: Promise<StockBasicSyncResult | null> | null = null
 
 export function getNextScanAt(): number | null {
   return _nextScanAt
@@ -165,6 +169,9 @@ export function startScheduler(): void {
   scheduleClosingHalfHourFinalize()
   scheduleTradeCalSync()
   schedulePortfolioForecast()
+  void runStartupStockBasicSyncIfStale().catch((error) =>
+    console.warn('[StockBasicSync] startup catch-up failed:', error instanceof Error ? error.message : String(error))
+  )
   // 启动时立即拉一次交易日历，确保调休补班日判断正确
   const _token = getTushareTokenOrNull()
   if (_token) {
@@ -788,10 +795,19 @@ export function runUnifiedAfterCloseSyncJob(
 
     if (!token) {
       const message = 'TUSHARE_DISABLED'
+      results.push(markAfterCloseTaskBlocked(tradeDate, 'security_master', message))
       results.push(markAfterCloseTaskBlocked(tradeDate, 'short_term_daily', message))
       results.push(markAfterCloseTaskBlocked(tradeDate, 'market_daily', message))
       results.push(markAfterCloseTaskBlocked(tradeDate, 'chip_structure', message))
     } else {
+      results.push(await runTrackedAfterCloseTask(tradeDate, 'security_master', async () => {
+        const synced = await runStockBasicSyncJob()
+        if (!synced) throw new Error('STOCK_BASIC_SYNC_INCOMPLETE')
+        const message = `证券 ${synced.rowCount}，恢复候选 ${synced.remappedCandidates}，登记公司 ${synced.materializedProjectCompanies}`
+        return synced.remapError
+          ? { status: 'partial', message: `${message}；候选重映射失败：${synced.remapError}` }
+          : { message }
+      }))
       results.push(await runTrackedAfterCloseTask(tradeDate, 'short_term_daily', async () => {
         const completed = await runAfterCloseDailySyncJob(tradeDate)
         if (!completed) throw new Error('SHORT_TERM_DAILY_INCOMPLETE')
@@ -1062,7 +1078,7 @@ async function syncWatchlistToStockPriceCache(dailyRows: DailyRow[], tradeDate: 
  */
 type DailyRow = Awaited<ReturnType<typeof fetchDailyByDate>>[number]
 
-/** ③ 每周一北京 04:00：全量替换 kpl_concept_members */
+/** 每周一北京 04:00：只同步当前题材源的成分股。证券主数据由18:00协调器独立负责。 */
 export function scheduleConceptMembersSync(): void {
   _conceptMembersTimer = setTimeout(async () => {
     const dow = new Date(Date.now() + 8 * 60 * 60 * 1000).getUTCDay()
@@ -1191,52 +1207,100 @@ export async function runConceptMembersSyncForSource(source: string): Promise<vo
     clearAndReplaceConceptMembers(db, rows)
     console.log(`[ConceptMembersSync] kpl_concept_members fully replaced with ${rows.length} rows`)
   })
-  // FR-151a: 每周一同步 stock_basic 全量信息（用于个性选股预筛）
-  await runStockBasicSyncJob()
 }
 
 /**
- * FR-151a: 独立同步 stock_basic_cache（可手动触发）
- * 调用 Tushare stock_basic 接口，全量替换本地缓存
+ * 独立同步证券主数据。身份数据以 stock_basic 为准，daily_basic 股本补充失败不阻断新股入库。
  */
-export async function runStockBasicSyncJob(): Promise<void> {
+export interface StockBasicSyncResult {
+  rowCount: number
+  filledCircFloat: number
+  latestOpenTradeDate: string | null
+  remappedCandidates: number
+  materializedProjectCompanies: number
+  remapError: string | null
+}
+
+export function runStockBasicSyncJob(): Promise<StockBasicSyncResult | null> {
+  if (_stockBasicSyncPromise) return _stockBasicSyncPromise
   const token = getTushareTokenOrNull()
   if (!token) {
     console.warn('[StockBasicSync] Tushare 未配置，跳过同步')
-    return
+    return Promise.resolve(null)
   }
-  try {
-    const basicRows = await fetchStockBasic(token)
-    if (basicRows.length === 0) {
-      console.warn('[StockBasicSync] got 0 rows, skipping')
-      return
+
+  let promise: Promise<StockBasicSyncResult | null>
+  promise = (async () => {
+    const synced = await withCronRetry('StockBasicSync', async () => {
+      const basicRows = await fetchStockBasic(token)
+      if (basicRows.length === 0) throw new Error('STOCK_BASIC_EMPTY')
+
+      const today = getBjTodayYmd()
+      let latestOpenTradeDate: string | null = null
+      const floatShareMap = new Map<string, number | null>()
+      try {
+        const startDate = offsetBjDateYmd(today, -14)
+        const calRows = await fetchTradeCal(token, 'SSE', startDate, today)
+        latestOpenTradeDate = calRows
+          .filter((row) => row.isOpen === 1)
+          .map((row) => row.calDate)
+          .sort((left, right) => right.localeCompare(left))[0] ?? null
+        if (latestOpenTradeDate) {
+          const dailyBasicRows = await fetchDailyBasicByDate(token, latestOpenTradeDate)
+          for (const row of dailyBasicRows) floatShareMap.set(row.tsCode, row.floatShare)
+        }
+      } catch (error) {
+        console.warn('[StockBasicSync] optional circ_float fill failed:', error instanceof Error ? error.message : String(error))
+      }
+
+      const now = Date.now()
+      const cacheRows = basicRows.map(r => ({
+        tsCode: r.tsCode,
+        name: r.name,
+        industry: r.industry,
+        market: r.market,
+        listStatus: r.listStatus,
+        circFloat: floatShareMap.get(r.tsCode) ?? null,
+        updatedAt: now,
+      }))
+      clearAndInsertStockBasic(getDb(), cacheRows)
+      const filledCircFloat = cacheRows.filter(r => r.circFloat != null).length
+      console.log(`[StockBasicSync] stock_basic_cache fully replaced with ${basicRows.length} rows, circ_float filled ${filledCircFloat}/${cacheRows.length}, latestOpenTradeDate=${latestOpenTradeDate ?? 'unavailable'}`)
+      return { rowCount: basicRows.length, filledCircFloat, latestOpenTradeDate }
+    })
+    if (!synced) throw new Error('STOCK_BASIC_SYNC_FAILED')
+
+    let remappedCandidates = 0
+    let materializedProjectCompanies = 0
+    let remapError: string | null = null
+    try {
+      const { remapUnmatchedIndustryResearchCompanyCandidates } = await import('./industryResearchGenerationService')
+      const remapped = remapUnmatchedIndustryResearchCompanyCandidates(getDb())
+      remappedCandidates = remapped.remappedCandidates
+      materializedProjectCompanies = remapped.materializedProjectCompanies
+      console.log(`[StockBasicSync] unmatched company remap scanned=${remapped.scannedCandidates} remapped=${remappedCandidates} materialized=${materializedProjectCompanies}`)
+    } catch (error) {
+      remapError = (error instanceof Error ? error.message : String(error)).slice(0, 300)
+      console.warn('[StockBasicSync] company remap failed:', remapError)
     }
+    return {
+      ...synced,
+      remappedCandidates,
+      materializedProjectCompanies,
+      remapError,
+    }
+  })().finally(() => {
+    if (_stockBasicSyncPromise === promise) _stockBasicSyncPromise = null
+  })
+  _stockBasicSyncPromise = promise
+  return promise
+}
 
-    // stock_basic 文档已明确不再提供股本字段；改用最近交易日 daily_basic.float_share 回填 circ_float
-    const today = getBjTodayYmd()
-    const startDate = offsetBjDateYmd(today, -14)
-    const calRows = await fetchTradeCal(token, 'SSE', startDate, today)
-    const latestOpenTradeDate = [...calRows].reverse().find(r => r.isOpen === 1)?.calDate ?? today
-    const dailyBasicRows = await fetchDailyBasicByDate(token, latestOpenTradeDate)
-    const floatShareMap = new Map(dailyBasicRows.map(r => [r.tsCode, r.floatShare]))
-
-    const now = Date.now()
-    const cacheRows = basicRows.map(r => ({
-      tsCode: r.tsCode,
-      name: r.name,
-      industry: r.industry,
-      market: r.market,
-      listStatus: r.listStatus,
-      circFloat: floatShareMap.get(r.tsCode) ?? null,
-      updatedAt: now
-    }))
-    clearAndInsertStockBasic(getDb(), cacheRows)
-    const filledCircFloat = cacheRows.filter(r => r.circFloat != null).length
-    console.log(`[StockBasicSync] stock_basic_cache fully replaced with ${basicRows.length} rows, circ_float filled ${filledCircFloat}/${cacheRows.length}, latestOpenTradeDate=${latestOpenTradeDate}`)
-  } catch (err) {
-    console.warn('[StockBasicSync] failed:', err instanceof Error ? err.message : String(err))
-    throw err
-  }
+export function runStartupStockBasicSyncIfStale(now = Date.now()): Promise<StockBasicSyncResult | null> {
+  const expectedBeijingYmd = getBeijingYmd(now)
+  if (!isStockBasicCacheStale(getDb(), expectedBeijingYmd)) return Promise.resolve(null)
+  console.log(`[StockBasicSync] startup cache is stale for ${expectedBeijingYmd}, triggering catch-up`)
+  return runStockBasicSyncJob()
 }
 
 /**

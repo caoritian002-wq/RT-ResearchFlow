@@ -35,6 +35,7 @@ coverage/
 .nyc_output/
 test-results/
 playwright-report/
+artifacts/
 impeccable-report.json
 
 # Local tools and scratch files

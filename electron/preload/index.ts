@@ -3405,8 +3405,9 @@ const api = {
         message?: string
       }>,
     onSignalCreated: (cb: (signal: DecisionSignalItem) => void) => {
-      ipcRenderer.on('decision:signalCreated', (_e, d) => cb(d))
-      return () => { ipcRenderer.removeAllListeners('decision:signalCreated') }
+      const listener = (_event: IpcRendererEvent, signal: DecisionSignalItem) => cb(signal)
+      ipcRenderer.on('decision:signalCreated', listener)
+      return () => { ipcRenderer.removeListener('decision:signalCreated', listener) }
     },
   },
 
@@ -3640,6 +3641,8 @@ const api = {
       ipcRenderer.invoke('industryResearch:cancelGeneration', { projectId, runId }),
     continueFinancialCollection: (projectId: string, runId: string) =>
       ipcRenderer.invoke('industryResearch:continueFinancialCollection', { projectId, runId }),
+    expandCompanyCandidates: (projectId: string, runId: string) =>
+      ipcRenderer.invoke('industryResearch:expandCompanyCandidates', { projectId, runId }),
     retryGenerationStage: (projectId: string, runId: string, stage?: string) =>
       ipcRenderer.invoke('industryResearch:retryGenerationStage', { projectId, runId, stage }),
     resolveCompanyCandidate: (payload: {

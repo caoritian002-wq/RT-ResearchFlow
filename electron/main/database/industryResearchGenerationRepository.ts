@@ -436,6 +436,40 @@ export function listCompanyCandidates(
   `).all(options.projectId) as IndustryResearchCompanyCandidateRow[]
 }
 
+export function listRemappableUnmatchedCompanyCandidates(
+  db: Database.Database,
+): IndustryResearchCompanyCandidateRow[] {
+  return db.prepare(`
+    SELECT candidate.*
+    FROM industry_research_company_candidates candidate
+    INNER JOIN industry_research_generation_runs run
+      ON run.id = candidate.run_id AND run.project_id = candidate.project_id
+    INNER JOIN industry_research_projects project
+      ON project.id = candidate.project_id
+    WHERE candidate.resolution_status = 'unmatched'
+      AND run.status = 'succeeded'
+      AND run.last_successful_stage IN ('companies', 'report')
+      AND project.status != 'archived'
+    ORDER BY candidate.updated_at ASC, candidate.id ASC
+  `).all() as IndustryResearchCompanyCandidateRow[]
+}
+
+export function updateUnmatchedCompanyCandidateMatches(
+  db: Database.Database,
+  candidateId: string,
+  matchedSecurities: NonNullable<CompanyCandidateInput['matchedSecurities']>,
+): IndustryResearchCompanyCandidateRow | null {
+  const resolutionStatus: ResearchCompanyCandidateResolution = matchedSecurities.length > 0
+    ? 'pending'
+    : 'unmatched'
+  db.prepare(`
+    UPDATE industry_research_company_candidates
+    SET matched_securities_json = ?, resolution_status = ?, exclusion_reason = NULL, updated_at = ?
+    WHERE id = ? AND resolution_status = 'unmatched'
+  `).run(JSON.stringify(matchedSecurities), resolutionStatus, Date.now(), candidateId)
+  return getCompanyCandidate(db, candidateId)
+}
+
 export function updateCompanyCandidateResolution(
   db: Database.Database,
   candidateId: string,

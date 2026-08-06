@@ -81,7 +81,7 @@ async function runStep(name: string, fn: () => number | Promise<number>): Promis
 function backfillNewsSignals(db: Database.Database, tradeDate: string): number {
   const publishedDateBJ = `${tradeDate.slice(0, 4)}-${tradeDate.slice(4, 6)}-${tradeDate.slice(6, 8)}`
   const rows = db.prepare(`
-    SELECT id, title, originalUrl, impactRating, impactRatingScore, publishedAt, summary, scanRunId
+    SELECT id, title, sourceName, originalUrl, impactRating, impactRatingScore, publishedAt, summary, scanRunId
     FROM briefings
     WHERE publishedDateBJ = ?
       AND (impactRating = 'CRITICAL' OR impactRatingScore >= 30)
@@ -90,6 +90,7 @@ function backfillNewsSignals(db: Database.Database, tradeDate: string): number {
   `).all(publishedDateBJ) as Array<{
     id: number
     title: string
+    sourceName: string
     originalUrl: string | null
     impactRating: string
     impactRatingScore: number
@@ -109,7 +110,7 @@ function backfillNewsSignals(db: Database.Database, tradeDate: string): number {
     title: row.title,
     summary: row.summary ?? row.title,
     reason: { impactRating: row.impactRating, impactRatingScore: row.impactRatingScore },
-    sourceRef: { briefingId: row.id, originalUrl: row.originalUrl, scanRunId: row.scanRunId },
+    sourceRef: { briefingId: row.id, sourceName: row.sourceName, originalUrl: row.originalUrl, scanRunId: row.scanRunId },
     signalTime: row.publishedAt ?? Date.now(),
     dedupKey: `news:critical:${row.id}`,
   }))

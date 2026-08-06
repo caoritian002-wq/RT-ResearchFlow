@@ -22,6 +22,7 @@ import {
   deleteResearchProject,
   deleteResearchProjects,
   getResearchProject,
+  IndustryResearchProjectDeletionError,
   listResearchEvidence,
   listResearchHypotheses,
   listResearchProjects,
@@ -49,6 +50,7 @@ import {
   confirmProjectEvidenceCandidate,
   createGenerationProgressEmitter,
   ensureGeneratedProjectCompanies,
+  expandIndustryResearchCompanyCandidates,
   getGenerationRunView,
   getWebSearchConfigView,
   resolveIndustryResearchCompanyCandidate,
@@ -88,7 +90,6 @@ import type {
   IndustryResearchValuationMethod,
 } from '../database/types'
 import {
-  hasResearchSnapshots,
   listChangeCandidates,
   listChangeSets,
 } from '../database/industryResearchChangeRepository'
@@ -457,13 +458,13 @@ function parseDecisionEventInput(payload: Record<string, unknown>): AppendDecisi
 
 function handleError(error: unknown) {
   if (error instanceof IndustryResearchError) return fail(error.code, error.message)
+  if (error instanceof IndustryResearchProjectDeletionError) return fail(error.code, error.message)
   if (error instanceof ResearchToolRuntimeError) return fail(error.code, error.message)
   if (error instanceof ResearchDiscussionError) return fail(error.code, error.message)
   if (error instanceof IndustryResearchMergeError) return { ...fail(error.code, error.message), details: error.details }
   if (error instanceof IndustryResearchDecisionError) return fail(error.code, error.message)
   if (error instanceof IndustryResearchMarketError) return fail(error.code, error.message)
   if (error instanceof IndustryResearchSnapshotError) return fail(error.code, error.message)
-  if (error instanceof Error && error.message === 'SNAPSHOT_PROTECTED') return fail('VERSION_CONFLICT', '已有不可变研究版本的项目只能归档')
   if (error instanceof Error && error.message === 'NOT_FOUND') return fail('NOT_FOUND', '研究对象不存在')
   console.error('[industryResearch]', error instanceof Error ? error.message : 'Unknown error')
   return fail('DB_ERROR', '产业研究数据操作失败')
@@ -479,6 +480,7 @@ function generationRunView(
     reportPartitions?: unknown
     reportDocument?: unknown
     financialCollection?: unknown
+    companyExpansion?: unknown
   },
 ) {
   if (!run) return null
@@ -512,6 +514,7 @@ function generationRunView(
     reportPartitions: extra?.reportPartitions ?? null,
     reportDocument: extra?.reportDocument ?? null,
     financialCollection: extra?.financialCollection ?? null,
+    companyExpansion: extra?.companyExpansion ?? null,
   }
 }
 
@@ -667,9 +670,6 @@ export function registerIndustryResearchHandlers(getMainWindow?: () => Electron.
   ipcMain.handle('industryResearch:deleteProject', async (_event, payload: Record<string, unknown>) => {
     try {
       const projectId = id(payload?.projectId, 'projectId')
-      if (hasResearchSnapshots(getDb(), projectId)) {
-        throw new IndustryResearchError('VERSION_CONFLICT', '该项目已有不可变研究版本，请归档而不是物理删除')
-      }
       const deleted = deleteResearchProject(getDb(), projectId)
       if (!deleted) return fail('NOT_FOUND', '研究项目不存在')
       return ok({ projectId, deleted: true })
@@ -1133,6 +1133,7 @@ export function registerIndustryResearchHandlers(getMainWindow?: () => Electron.
           reportPartitions: view.reportPartitions,
           reportDocument: view.reportDocument,
           financialCollection: view.financialCollection,
+          companyExpansion: view.companyExpansion,
         }),
       })
     } catch (error) { return handleError(error) }
@@ -1152,6 +1153,7 @@ export function registerIndustryResearchHandlers(getMainWindow?: () => Electron.
           reportPartitions: view.reportPartitions,
           reportDocument: view.reportDocument,
           financialCollection: view.financialCollection,
+          companyExpansion: view.companyExpansion,
         }),
         evidenceCandidates: view.evidenceCandidates.map(evidenceCandidateView),
         companyCandidates: view.companyCandidates.map(companyCandidateView),
@@ -1162,6 +1164,7 @@ export function registerIndustryResearchHandlers(getMainWindow?: () => Electron.
         reportPartitions: view.reportPartitions,
         reportDocument: view.reportDocument,
         financialCollection: view.financialCollection,
+        companyExpansion: view.companyExpansion,
       })
     } catch (error) { return handleError(error) }
   })
@@ -1181,6 +1184,7 @@ export function registerIndustryResearchHandlers(getMainWindow?: () => Electron.
         reportPartitions: view.reportPartitions,
         reportDocument: view.reportDocument,
         financialCollection: view.financialCollection,
+        companyExpansion: view.companyExpansion,
       }))
     } catch (error) { return handleError(error) }
   })
@@ -1205,7 +1209,22 @@ export function registerIndustryResearchHandlers(getMainWindow?: () => Electron.
         reportPartitions: view.reportPartitions,
         reportDocument: view.reportDocument,
         financialCollection: view.financialCollection,
+        companyExpansion: view.companyExpansion,
       }))
+    } catch (error) { return handleError(error) }
+  })
+
+  ipcMain.handle('industryResearch:expandCompanyCandidates', async (_event, payload: Record<string, unknown>) => {
+    try {
+      const projectId = id(payload.projectId, 'projectId')
+      const runId = id(payload.runId, 'runId')
+      return ok(await expandIndustryResearchCompanyCandidates(
+        getDb(),
+        projectId,
+        runId,
+        resolveIndustryResearchSkill,
+        { emitter: progressEmitter },
+      ))
     } catch (error) { return handleError(error) }
   })
 
@@ -1231,6 +1250,7 @@ export function registerIndustryResearchHandlers(getMainWindow?: () => Electron.
         reportPartitions: view.reportPartitions,
         reportDocument: view.reportDocument,
         financialCollection: view.financialCollection,
+        companyExpansion: view.companyExpansion,
       }))
     } catch (error) { return handleError(error) }
   })

@@ -110,6 +110,9 @@ describe('产业研究 GPT 原生网页搜索适配', () => {
     const request = fakeCall.mock.calls[0][1]
     expect(request.prompt).toContain('当前北京时间日期：2026-07-19')
     expect(request.prompt).toContain('本次研究数据截止日：2024-12-31')
+    expect(request.prompt).toContain('候选公司覆盖台账')
+    expect(request.prompt).toContain('每个关键受益环节尽量检索至少3家可比A股公司')
+    expect(request.prompt).toContain('不得用一家已找到公告的公司代替整个A股候选池')
     expect(result).toMatchObject({ mode: 'mixed', provider: 'chatgpt', model: 'gpt-5.6-sol', memo })
     expect(result.selectedTopNIds).toHaveLength(1)
     expect(listEvidenceCandidates(db, { projectId: 'project-native', runId: 'run-native' })[0]).toMatchObject({

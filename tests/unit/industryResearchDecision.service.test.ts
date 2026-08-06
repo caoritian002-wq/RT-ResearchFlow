@@ -12,7 +12,11 @@ import {
   saveResearchProjectCompany,
   saveResearchSecurity,
 } from '../../electron/main/database/industryResearchFinancialRepository'
-import { createResearchProject } from '../../electron/main/database/industryResearchRepository'
+import {
+  createResearchProject,
+  deleteResearchProject,
+  getResearchProject,
+} from '../../electron/main/database/industryResearchRepository'
 import {
   adoptIndustryResearchSkillVersion,
   appendIndustryResearchDecisionEvent,
@@ -234,6 +238,13 @@ describe('产业研究决策服务', () => {
     })
     expect(blocked).toEqual(expect.objectContaining({ result: 'blocked', observationId: null }))
     expect(db.prepare('SELECT COUNT(*) AS count FROM industry_research_decision_events').get()).toEqual({ count: 2 })
+
+    const sharedSkillSnapshotCount = (db.prepare('SELECT COUNT(*) AS count FROM industry_research_skill_snapshots').get() as { count: number }).count
+    expect(deleteResearchProject(db, project.id)).toBe(true)
+    expect(getResearchProject(db, project.id)).toBeNull()
+    expect(db.prepare('SELECT COUNT(*) AS count FROM industry_research_decision_events').get()).toEqual({ count: 0 })
+    expect(db.prepare('SELECT COUNT(*) AS count FROM industry_research_skill_snapshots').get())
+      .toEqual({ count: sharedSkillSnapshotCount })
   })
 
   it('Skill变化只在显式采用后写入且不会自动修改假设', () => {
@@ -390,5 +401,10 @@ describe('产业研究决策服务', () => {
       valuationSnapshotId: snapshots.valuationSnapshotId,
     }))
     expect((replay.marketContext.valuation as { currentPrice: number }).currentPrice).toBe(10)
+
+    expect(deleteResearchProject(db, project.id)).toBe(true)
+    expect(getResearchProject(db, project.id)).toBeNull()
+    expect(db.prepare('SELECT COUNT(*) AS count FROM industry_research_market_snapshots').get()).toEqual({ count: 0 })
+    expect(db.prepare('SELECT COUNT(*) AS count FROM industry_research_valuation_snapshots').get()).toEqual({ count: 0 })
   })
 })

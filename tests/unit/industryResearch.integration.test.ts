@@ -11,6 +11,9 @@ const deterministicState = vi.hoisted(() => ({
   reportMetaPrompt: '',
   callCount: 0,
   companyMode: 'exact' as 'exact' | 'ambiguous' | 'unmatched',
+  includeCompanyCoveragePool: false,
+  companyRepairEnabled: false,
+  retrievalCompanyNames: [] as string[],
 }))
 
 vi.mock('../../electron/main/services/aiFallbackService', () => ({
@@ -56,6 +59,11 @@ vi.mock('../../electron/main/services/aiFallbackService', () => ({
     if (stage === 'report') deterministicState.reportMetaPrompt = prompt
     if (deterministicState.failStage === stage) throw new Error(`deterministic ${stage} failure`)
     const [candidate0, candidate1, candidate2] = deterministicState.candidateIds
+    const contextText = prompt.slice(prompt.lastIndexOf('【上下文】\n') + '【上下文】\n'.length)
+    let stageContext: Record<string, unknown> = {}
+    try { stageContext = JSON.parse(contextText) as Record<string, unknown> } catch { /* non-stage prompt */ }
+    const coverageNodeId = ((stageContext.map as { nodes?: Array<{ id?: string; name?: string }> } | undefined)?.nodes || [])
+      .find((node) => node.name === 'A股光通信候选池')?.id || 'node-fiber'
     const payloads: Record<string, Record<string, unknown>> = {
       scope: {
         title: '光纤光缆联合研究',
@@ -72,6 +80,10 @@ vi.mock('../../electron/main/services/aiFallbackService', () => ({
         nodes: [
           { id: 'node-preform', type: 'material', name: '光纤预制棒', stage: '上游', candidateIds: [candidate0] },
           { id: 'node-fiber', type: 'product', name: '光纤光缆', stage: '中游', candidateIds: [candidate1] },
+          ...(deterministicState.includeCompanyCoveragePool ? [{
+            id: 'node-company-pool', type: 'company', name: 'A股光通信候选池', stage: '资本市场',
+            status: '需要覆盖可比上市公司', candidateIds: [candidate2],
+          }] : []),
         ],
         edges: [
           { id: 'edge-preform-fiber', source: 'node-preform', target: 'node-fiber', relation: '成本传导', bottleneck: true, candidateIds: [candidate0, candidate1] },
@@ -93,7 +105,15 @@ vi.mock('../../electron/main/services/aiFallbackService', () => ({
         }],
       },
       companies: {
-        companies: [deterministicState.companyMode === 'exact' ? {
+        companies: deterministicState.companyRepairEnabled && stageContext.task === '公司覆盖补全' ? [{
+          legalName: '烽火通信科技股份有限公司', displayName: '烽火通信',
+          rationale: '本地证券身份明确，作为同生态位横向候选保留，业务暴露仍需公告验证',
+          researchNodeIds: [coverageNodeId], tsCode: '600498.SH', candidateIds: [],
+        }, {
+          legalName: '江苏亨通光电股份有限公司', displayName: '亨通光电',
+          rationale: '本地证券身份明确，作为同生态位横向候选保留，业务暴露仍需公告验证',
+          researchNodeIds: [coverageNodeId], tsCode: '600487.SH', candidateIds: [],
+        }] : [deterministicState.companyMode === 'exact' ? {
           legalName: '江苏中天科技股份有限公司',
           displayName: '中天科技',
           rationale: '具备光纤光缆业务暴露，仍需公告与财务事实验证',
@@ -171,7 +191,9 @@ vi.mock('../../electron/main/services/researchToolRuntime', async (importOrigina
         plan: {
           queries: Array.from({ length: 8 }, (_, index) => ({
             id: `query-${index}`,
-            text: `光纤光缆 query ${index}`,
+            text: deterministicState.retrievalCompanyNames[index]
+              ? `${deterministicState.retrievalCompanyNames[index]} 光纤光缆业务核验`
+              : `光纤光缆 query ${index}`,
             intent: index % 2 ? 'company_exposure' as const : 'supply_demand_price' as const,
             targetDomains: [],
             rationale: '确定性联合回归',
@@ -220,7 +242,9 @@ import { upsertAll as upsertStockBasics } from '../../electron/main/database/sto
 import {
   continueIndustryResearchFinancialCollection,
   ensureGeneratedProjectCompanies,
+  expandIndustryResearchCompanyCandidates,
   getGenerationRunView,
+  remapUnmatchedIndustryResearchCompanyCandidates,
   retryIndustryResearchGeneration,
   resolveGenerationDataAsOf,
   resolveIndustryResearchCompanyCandidate,
@@ -298,7 +322,7 @@ async function waitForTerminalRun(db: Database.Database, projectId: string, runI
   throw new Error(`生成运行 ${runId} 未在预期时间内结束`)
 }
 
-describe('产业研究第180阶段联合回归', { timeout: 30_000 }, () => {
+describe('产业研究第180阶段联合回归', () => {
   let db: Database.Database
   let tempDir: string
   let dbPath: string
@@ -322,6 +346,9 @@ describe('产业研究第180阶段联合回归', { timeout: 30_000 }, () => {
     deterministicState.reportMetaPrompt = ''
     deterministicState.callCount = 0
     deterministicState.companyMode = 'exact'
+    deterministicState.includeCompanyCoveragePool = false
+    deterministicState.companyRepairEnabled = false
+    deterministicState.retrievalCompanyNames = []
     tempDir = mkdtempSync(join(tmpdir(), 'trade-watch-fr230-integration-'))
     dbPath = join(tempDir, 'research.db')
     db = new Database(dbPath)
@@ -341,6 +368,22 @@ describe('产业研究第180阶段联合回归', { timeout: 30_000 }, () => {
       tsCode: '002989.SZ',
       name: '中天精装',
       industry: '装修装饰',
+      market: '主板',
+      listStatus: 'L',
+      circFloat: null,
+      updatedAt: Date.now(),
+    }, {
+      tsCode: '600498.SH',
+      name: '烽火通信',
+      industry: '通信设备',
+      market: '主板',
+      listStatus: 'L',
+      circFloat: null,
+      updatedAt: Date.now(),
+    }, {
+      tsCode: '600487.SH',
+      name: '亨通光电',
+      industry: '通信设备',
       market: '主板',
       listStatus: 'L',
       circFloat: null,
@@ -595,8 +638,8 @@ describe('产业研究第180阶段联合回归', { timeout: 30_000 }, () => {
     expect(secondCompleted.run?.status).toBe('succeeded')
     const firstGraph = getResearchGraph(db, 'project-main')
     const secondGraph = getResearchGraph(db, 'project-other')
-    expect(firstGraph.nodes).toHaveLength(2)
-    expect(secondGraph.nodes).toHaveLength(2)
+    expect(firstGraph.nodes).toHaveLength(4)
+    expect(secondGraph.nodes).toHaveLength(4)
     expect(firstGraph.nodes.map((node) => node.id)).not.toEqual(secondGraph.nodes.map((node) => node.id))
     expect(firstGraph.nodes.every((node) => /^node_[0-9a-f]{20}$/.test(node.id))).toBe(true)
     expect(secondGraph.nodes.every((node) => /^node_[0-9a-f]{20}$/.test(node.id))).toBe(true)
@@ -606,8 +649,112 @@ describe('产业研究第180阶段联合回归', { timeout: 30_000 }, () => {
     expect(getResearchSecurityByTsCode(db, '600522.SH')?.company_id).toBe(firstCompany.company_id)
   })
 
+  it('投资型产业图谱存在A股候选池时会补齐横向公司而不是只保留单一标的', async () => {
+    deterministicState.includeCompanyCoveragePool = true
+    deterministicState.companyRepairEnabled = true
+    const started = await startIndustryResearchGeneration(db, {
+      projectId: 'project-main',
+      researchQuestion: '验证产业链关键生态位会形成多家公司横向候选池。',
+      scope: { enableWebRetrieval: true },
+    }, () => skill, { createProject: () => ({ id: 'unused' }) })
+    const completed = await waitForTerminalRun(db, 'project-main', started.run.id)
+
+    expect(completed.run?.status).toBe('succeeded')
+    expect(completed.companyCandidates.map((item) => item.display_name).sort())
+      .toEqual(['中天科技', '亨通光电', '烽火通信'].sort())
+    expect(listResearchProjectCompanies(db, 'project-main').map((item) => item.short_name).sort())
+      .toEqual(['中天科技', '亨通光电', '烽火通信'].sort())
+    const artifacts = JSON.parse(completed.run?.stage_artifacts_json || '{}') as {
+      companies?: { coverage?: { status?: string; activeAShareCount?: number; targets?: Array<{ status?: string }> } }
+    }
+    expect(artifacts.companies?.coverage).toMatchObject({
+      status: 'complete',
+      activeAShareCount: 3,
+      targets: [{ status: 'covered' }],
+    })
+    expect(completed.companyCandidates.filter((item) => item.rationale.includes('无证据支撑'))).toHaveLength(2)
+  })
+
+  it('检索轨迹明确点名且本地证券唯一匹配的公司不会在最终映射阶段丢失', async () => {
+    deterministicState.retrievalCompanyNames = ['烽火通信', '亨通光电']
+    const started = await startIndustryResearchGeneration(db, {
+      projectId: 'project-main',
+      researchQuestion: '验证检索计划点名的本地A股公司会保留为待核验候选。',
+      scope: { enableWebRetrieval: true },
+    }, () => skill, { createProject: () => ({ id: 'unused' }) })
+    const completed = await waitForTerminalRun(db, 'project-main', started.run.id)
+
+    expect(completed.run?.status).toBe('succeeded')
+    expect(completed.companyCandidates.map((item) => item.display_name).sort())
+      .toEqual(['中天科技', '亨通光电', '烽火通信'].sort())
+    expect(completed.companyCandidates.filter((item) => item.rationale.includes('检索计划已主动搜索')))
+      .toHaveLength(2)
+    expect(listResearchProjectCompanies(db, 'project-main').map((item) => item.short_name).sort())
+      .toEqual(['中天科技', '亨通光电', '烽火通信'].sort())
+  })
+
+  it('既有成功研究可显式补全公司映射且不改写原报告', async () => {
+    const started = await startIndustryResearchGeneration(db, {
+      projectId: 'project-main',
+      researchQuestion: '先生成只有单一公司的成功研究，再验证显式补全。',
+      scope: { enableWebRetrieval: true },
+    }, () => skill, { createProject: () => ({ id: 'unused' }) })
+    const completed = await waitForTerminalRun(db, 'project-main', started.run.id)
+    const originalMarkdown = completed.reportDocument.markdown
+    expect(listResearchProjectCompanies(db, 'project-main')).toHaveLength(1)
+
+    deterministicState.companyRepairEnabled = true
+    const expansionFetchers = fetchersWith({
+      income: vi.fn(async (_token: string, tsCode: string) => [financialRow('20241231', {
+        revenue: 1_000_000,
+        n_income_attr_p: 100_000,
+      }, { tsCode, annDate: '20250331', fAnnDate: '20250331' })]),
+      fina_mainbz: vi.fn(async (_token: string, tsCode: string) => [financialRow('20241231', {
+        bz_item: '光通信产品',
+        bz_sales: 1_000_000,
+        bz_profit: 300_000,
+        bz_cost: 700_000,
+        curr_type: 'CNY',
+      }, { tsCode, annDate: '20250331', fAnnDate: '20250331' })]),
+    })
+    const expanded = await expandIndustryResearchCompanyCandidates(
+      db,
+      'project-main',
+      started.run.id,
+      () => skill,
+      { financial: { token: 'deterministic-token', fetchers: expansionFetchers } },
+    )
+    const derived = await waitForTerminalRun(db, 'project-main', expanded.derivedRunId)
+
+    expect(expanded).toMatchObject({
+      addedCandidates: 2,
+      addedProjectCompanies: 2,
+      totalProjectCompanies: 3,
+      targetCompanies: 3,
+      projectedNodes: 4,
+    })
+    expect(derived.run?.status).toBe('succeeded')
+    expect(derived.run?.id).not.toBe(started.run.id)
+    expect(getGenerationRunView(db, 'project-main', started.run.id).reportDocument.markdown).toBe(originalMarkdown)
+    expect(listResearchProjectCompanies(db, 'project-main').map((item) => item.short_name).sort())
+      .toEqual(['中天科技', '亨通光电', '烽火通信'].sort())
+    const graph = getResearchGraph(db, 'project-main')
+    expect(graph.nodes.some((item) => item.name.includes('亨通光电'))).toBe(true)
+    expect(graph.nodes.some((item) => item.name.includes('烽火通信'))).toBe(true)
+    expect(graph.edges.filter((item) => item.relation === '映射到')).toHaveLength(3)
+    for (const company of listResearchProjectCompanies(db, 'project-main')) {
+      expect(listResearchFinancialFacts(db, company.company_id).length).toBeGreaterThan(0)
+      const exposures = listResearchBusinessExposures(db, 'project-main', company.company_id)
+      expect(exposures.length).toBeGreaterThan(0)
+      expect(exposures.every((item) => item.research_node_id != null)).toBe(true)
+      expect(getResearchFinancialSyncState(db, company.company_id, 'income')?.status).toBe('success')
+      expect(getResearchFinancialSyncState(db, company.company_id, 'fina_mainbz')?.status).toBe('success')
+    }
+  })
+
   it('歧义或无匹配证券的公司线索不会自动登记为项目公司', async () => {
     deterministicState.companyMode = 'ambiguous'
+    deterministicState.includeCompanyCoveragePool = true
     const ambiguous = await startIndustryResearchGeneration(db, {
       projectId: 'project-main',
       researchQuestion: '验证名称歧义的公司候选不会被系统猜测证券代码。',
@@ -619,8 +766,16 @@ describe('产业研究第180阶段联合回归', { timeout: 30_000 }, () => {
     expect(ambiguousCompleted.companyCandidates[0]).toMatchObject({ resolution_status: 'pending' })
     expect(JSON.parse(ambiguousCompleted.companyCandidates[0].matched_securities_json)).toHaveLength(2)
     expect(listResearchProjectCompanies(db, 'project-main')).toHaveLength(0)
+    const ambiguousArtifacts = JSON.parse(ambiguousCompleted.run?.stage_artifacts_json || '{}') as {
+      companies?: { coverage?: { activeAShareCount?: number; targets?: Array<{ status?: string }> } }
+    }
+    expect(ambiguousArtifacts.companies?.coverage).toMatchObject({
+      activeAShareCount: 0,
+      targets: [{ status: 'uncovered' }],
+    })
 
     deterministicState.companyMode = 'unmatched'
+    deterministicState.includeCompanyCoveragePool = false
     const unmatched = await startIndustryResearchGeneration(db, {
       projectId: 'project-other',
       researchQuestion: '验证本地无匹配的境外公司不会被自动登记为 A 股公司。',
@@ -630,6 +785,64 @@ describe('产业研究第180阶段联合回归', { timeout: 30_000 }, () => {
 
     expect(unmatchedCompleted.companyCandidates[0]).toMatchObject({ resolution_status: 'unmatched' })
     expect(listResearchProjectCompanies(db, 'project-other')).toHaveLength(0)
+  })
+
+  it('证券主数据刷新后只重映射未匹配候选并恢复长鑫科创板代码', async () => {
+    deterministicState.companyMode = 'unmatched'
+    const started = await startIndustryResearchGeneration(db, {
+      projectId: 'project-other',
+      researchQuestion: '验证新股上市后证券主数据刷新能够恢复项目公司映射。',
+      scope: { enableWebRetrieval: true },
+    }, () => skill, { createProject: () => ({ id: 'unused' }) })
+    const completed = await waitForTerminalRun(db, 'project-other', started.run.id)
+    const originalMarkdown = completed.reportDocument.markdown
+    const candidate = completed.companyCandidates[0]
+    db.prepare(`
+      UPDATE industry_research_company_candidates
+      SET display_name = '长鑫科技', legal_name_candidate = '长鑫科技集团股份有限公司'
+      WHERE id = ?
+    `).run(candidate.id)
+    upsertStockBasics(db, [{
+      tsCode: '688825.SH',
+      name: '长鑫科技',
+      industry: '半导体',
+      market: '科创板',
+      listStatus: 'L',
+      circFloat: null,
+      updatedAt: Date.now(),
+    }])
+    const callCountBeforeRemap = deterministicState.callCount
+
+    const remapped = remapUnmatchedIndustryResearchCompanyCandidates(db)
+
+    expect(remapped).toMatchObject({
+      scannedCandidates: 1,
+      remappedCandidates: 1,
+      exactMatches: 1,
+      ambiguousMatches: 0,
+      materializedProjectCompanies: 1,
+      stillUnmatched: 0,
+    })
+    expect(listCompanyCandidates(db, { projectId: 'project-other', runId: started.run.id })[0])
+      .toMatchObject({ resolution_status: 'accepted' })
+    expect(JSON.parse(listCompanyCandidates(db, { projectId: 'project-other', runId: started.run.id })[0].matched_securities_json))
+      .toMatchObject([{ tsCode: '688825.SH', stockName: '长鑫科技', matchStatus: 'exact' }])
+    expect(listResearchProjectCompanies(db, 'project-other')).toMatchObject([{
+      short_name: '长鑫科技',
+      status: 'candidate',
+    }])
+    expect(getResearchSecurityByTsCode(db, '688825.SH')).toMatchObject({
+      ts_code: '688825.SH',
+      exchange: 'SSE',
+      list_status: 'L',
+    })
+    expect(getGenerationRunView(db, 'project-other', started.run.id).reportDocument.markdown).toBe(originalMarkdown)
+    expect(deterministicState.callCount).toBe(callCountBeforeRemap)
+    expect(remapUnmatchedIndustryResearchCompanyCandidates(db)).toMatchObject({
+      scannedCandidates: 0,
+      remappedCandidates: 0,
+      materializedProjectCompanies: 0,
+    })
   })
 
   it('历史成功运行缺少项目公司时可幂等补登记且不调用模型', async () => {
@@ -724,12 +937,22 @@ describe('产业研究第180阶段联合回归', { timeout: 30_000 }, () => {
     expect(deterministicState.callCount).toBe(callCountBeforeRecovery)
     expect(getResearchProject(db, 'project-main')?.title).toBe('光纤光缆联合研究')
     const recoveredGraph = getResearchGraph(db, 'project-main')
-    expect(recoveredGraph.nodes).toHaveLength(2)
-    expect(recoveredGraph.edges).toHaveLength(1)
+    expect(recoveredGraph.nodes).toHaveLength(4)
+    expect(recoveredGraph.edges).toHaveLength(3)
+    expect(recoveredGraph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ relation: '成本传导' }),
+      expect.objectContaining({ relation: '关联候选' }),
+      expect.objectContaining({ relation: '映射到' }),
+    ]))
     expect(listResearchProjectCompanies(db, 'project-main')).toHaveLength(1)
     const companyCandidate = listCompanyCandidates(db, { projectId: 'project-main', runId: started.run.id })[0]
     const companyNodeIds = JSON.parse(companyCandidate.research_node_ids_json) as string[]
-    expect(companyNodeIds).toEqual([recoveredGraph.nodes.find((node) => node.name === '光纤光缆')?.id])
+    expect(companyNodeIds).toHaveLength(3)
+    expect(companyNodeIds).toEqual(expect.arrayContaining([
+      recoveredGraph.nodes.find((node) => node.name === '光纤光缆')?.id,
+      recoveredGraph.nodes.find((node) => node.type === 'company')?.id,
+      recoveredGraph.nodes.find((node) => node.type === 'stock')?.id,
+    ]))
     const recoveredArtifacts = JSON.parse(recovered.stage_artifacts_json) as {
       persistenceRecovery?: { reusedGeneratedArtifacts?: boolean; status?: string }
     }

@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3'
 export type AfterCloseSyncTrigger = 'scheduled' | 'startup_catch_up'
 export type AfterCloseSyncRunStatus = 'running' | 'completed' | 'partial' | 'failed' | 'blocked'
 export type AfterCloseSyncTaskKey =
+  | 'security_master'
   | 'short_term_daily'
   | 'market_daily'
   | 'chip_structure'

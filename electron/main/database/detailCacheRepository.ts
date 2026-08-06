@@ -1,11 +1,15 @@
 import { getDb } from './db'
 import type { DetailCacheRow } from './types'
 
+export function hasUsableDetailContent(content: string | null | undefined): boolean {
+  return Boolean(content?.trim())
+}
+
 export function getCachedDetail(cacheKey: string): DetailCacheRow | null {
   const row = getDb()
     .prepare('SELECT * FROM detail_cache WHERE cacheKey = ?')
     .get(cacheKey) as DetailCacheRow | undefined
-  return row ?? null
+  return row && hasUsableDetailContent(row.content) ? row : null
 }
 
 export function setCachedDetail(cacheKey: string, briefingUrl: string, content: string): void {

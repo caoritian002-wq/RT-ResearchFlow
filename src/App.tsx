@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { useAppStore } from './store/appStore'
 import { isInTradingHours } from './utils/tradingHours'
 import { FilterBar } from './components/FilterBar/FilterBar'
@@ -36,6 +36,15 @@ import {
 import { AppConfirmDialog } from './components/shared/AppConfirmDialog'
 import { AppToast, type AppToastTone } from './components/shared/AppToast'
 import { subscribeAppToast } from './components/shared/appToastBus'
+import { DecisionSignalToast } from './components/DecisionSignalToast/DecisionSignalToast'
+import {
+  buildDecisionSignalToastBatch,
+  parseDecisionSignalBriefingId,
+  shouldShowDecisionSignalToast,
+  type DecisionSignalToastBatch,
+  type DecisionSignalToastSignal,
+} from './components/DecisionSignalToast/decisionSignalToastModel'
+import { useDecisionSignalToastPreview } from '@renderer/components/DecisionSignalToast/useDecisionSignalToastPreview'
 
 const AIAnalysis = lazy(() => import('./components/AIAnalysis/AIAnalysis').then((module) => ({ default: module.AIAnalysis })))
 const DeepResearchWorkbench = lazy(() => import('./components/AIAnalysis/DeepResearchWorkbench').then((module) => ({ default: module.DeepResearchWorkbench })))
@@ -184,6 +193,17 @@ export default function App() {
   const [startupBacktestSyncing, setStartupBacktestSyncing] = useState(false)
   const [startupBacktestError, setStartupBacktestError] = useState<string | null>(null)
   const [appToast, setAppToast] = useState<{ message: string; tone: AppToastTone } | null>(null)
+  const [decisionSignalToast, setDecisionSignalToast] = useState<DecisionSignalToastBatch | null>(null)
+  const [decisionSignalToastKey, setDecisionSignalToastKey] = useState(0)
+  const decisionSignalBufferRef = useRef<DecisionSignalToastSignal[]>([])
+  const decisionSignalAggregationTimerRef = useRef<number | null>(null)
+  const showDecisionSignalToastPreview = useCallback((signal: DecisionSignalToastSignal) => {
+    const notice = buildDecisionSignalToastBatch([signal])
+    if (!notice) return
+    setDecisionSignalToastKey((current) => current + 1)
+    setDecisionSignalToast(notice)
+  }, [])
+  const priorityNewsPreview = useDecisionSignalToastPreview(showDecisionSignalToastPreview)
   const industryResearchStageProgress = industryResearchTask
     ? buildResearchStageProgress({
         status: industryResearchTask.status,
@@ -216,6 +236,7 @@ export default function App() {
     handleNewBriefings,
     updateSourceProgress,
     setAIPendingAnalysis,
+    aiProgress,
     setAiProgress,
     activeTab,
     setActiveTab,
@@ -235,6 +256,7 @@ export default function App() {
     setAIAnalysisSubTab,
     clearPendingResearchDiscussion,
     navigateToIndustryResearch,
+    navigateToBriefing,
     openPremarketScenario
   } = useAppStore()
   const navShellRef = useRef<HTMLDivElement>(null)
@@ -562,8 +584,19 @@ export default function App() {
     const offAiProgress = window.api.ai.onAnalyzeProgress((data) => {
       setAiProgress(data)
     })
-    const offDecisionSignal = window.api.decision.onSignalCreated(() => {
-      loadDecisionSignalSummary()
+    const offDecisionSignal = window.api.decision.onSignalCreated((signal) => {
+      void loadDecisionSignalSummary()
+      if (!shouldShowDecisionSignalToast(signal, settings)) return
+      decisionSignalBufferRef.current.push(signal)
+      if (decisionSignalAggregationTimerRef.current !== null) return
+      decisionSignalAggregationTimerRef.current = window.setTimeout(() => {
+        const notice = buildDecisionSignalToastBatch(decisionSignalBufferRef.current)
+        decisionSignalBufferRef.current = []
+        decisionSignalAggregationTimerRef.current = null
+        if (!notice) return
+        setDecisionSignalToastKey((current) => current + 1)
+        setDecisionSignalToast(notice)
+      }, 250)
     })
 
     return () => {
@@ -575,8 +608,31 @@ export default function App() {
       offAiAvailable()
       offAiProgress()
       offDecisionSignal()
+      if (decisionSignalAggregationTimerRef.current !== null) {
+        window.clearTimeout(decisionSignalAggregationTimerRef.current)
+        decisionSignalAggregationTimerRef.current = null
+      }
+      decisionSignalBufferRef.current = []
     }
-  }, [settings?.autoAiAnalysisPrompt])
+  }, [
+    settings?.autoAiAnalysisPrompt,
+    settings?.decision_notify_in_app_enabled,
+    settings?.decision_notify_min_priority,
+  ])
+
+  function openDecisionSignalNotice(signal: DecisionSignalToastSignal): void {
+    setDecisionSignalToast(null)
+    const briefingId = parseDecisionSignalBriefingId(signal)
+    if (briefingId !== null) navigateToBriefing(briefingId)
+  }
+
+  async function startPriorityNewsPreview(): Promise<void> {
+    if (await priorityNewsPreview.start()) setConfigDrawerOpen(false)
+  }
+
+  async function showNextPriorityNewsPreview(): Promise<void> {
+    if (await priorityNewsPreview.showNext()) setConfigDrawerOpen(false)
+  }
 
   const NAV_TABS: Array<{ tab: Tab; label: string; icon: PrimaryNavigationIconName }> = [
     { tab: 'decision-center', label: '今日看板', icon: 'dashboard' },
@@ -793,6 +849,13 @@ export default function App() {
         testId="app-global-toast"
         onClose={() => setAppToast(null)}
       />
+      <DecisionSignalToast
+        notice={decisionSignalToast}
+        noticeKey={decisionSignalToastKey}
+        raised={aiProgress != null}
+        onOpen={openDecisionSignalNotice}
+        onClose={() => setDecisionSignalToast(null)}
+      />
       <AppConfirmDialog
         open={startupBacktestSync != null}
         title="补齐预测回测分时数据"
@@ -830,6 +893,10 @@ export default function App() {
         onToggleTheme={toggleTheme}
         initializationFlow={initializationFlow}
         onStartInitialization={startInitializationFlow}
+        priorityNewsPreview={priorityNewsPreview.state}
+        onStartPriorityNewsPreview={startPriorityNewsPreview}
+        onShowNextPriorityNewsPreview={showNextPriorityNewsPreview}
+        onStopPriorityNewsPreview={priorityNewsPreview.stop}
       />
       <MessageCenterDrawer open={messageCenterOpen} messages={messages} onClose={() => setMessageCenterOpen(false)} />
       {onboardingOpen && (

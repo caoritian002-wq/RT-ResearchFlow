@@ -2,7 +2,7 @@ import { resolve } from 'path'
 import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   main: {
     build: {
       lib: {
@@ -45,9 +45,14 @@ export default defineConfig({
     },
     resolve: {
       alias: {
+        '@renderer/components/DecisionSignalToast/useDecisionSignalToastPreview': resolve(
+          mode === 'production'
+            ? 'src/components/DecisionSignalToast/useDecisionSignalToastPreview.disabled.ts'
+            : 'src/components/DecisionSignalToast/useDecisionSignalToastPreview.ts'
+        ),
         '@renderer': resolve('src')
       }
     },
     plugins: [react()]
   }
-})
+}))
