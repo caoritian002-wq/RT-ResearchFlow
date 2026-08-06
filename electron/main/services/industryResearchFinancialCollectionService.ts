@@ -91,11 +91,13 @@ interface CollectionTarget {
   companyName: string
   securityId: string
   tsCode: string
+  researchNodeId: string | null
 }
 
 interface CollectProjectFinancialsOptions {
   token?: string | null
   fetchers?: IndustryResearchFinancialFetchers
+  researchNodeIdsByTsCode?: Record<string, string[]>
   shouldCancel?: () => boolean
   onProgress?: (state: ProjectFinancialCollectionState) => void
   now?: () => number
@@ -105,7 +107,28 @@ function isListedAShare(tsCode: string, listStatus: string | null): boolean {
   return /^\d{6}\.(SH|SZ|BJ)$/.test(tsCode) && (listStatus === null || listStatus === 'L')
 }
 
-function listTargets(db: Database.Database, projectId: string): CollectionTarget[] {
+function firstProjectResearchNodeId(
+  db: Database.Database,
+  projectId: string,
+  tsCode: string,
+  researchNodeIdsByTsCode: Record<string, string[]>,
+): string | null {
+  const ids = researchNodeIdsByTsCode[tsCode] ?? []
+  const statement = db.prepare(`
+    SELECT id FROM industry_research_nodes
+    WHERE project_id = ? AND id = ?
+  `)
+  for (const id of ids) {
+    if (statement.get(projectId, id)) return id
+  }
+  return null
+}
+
+function listTargets(
+  db: Database.Database,
+  projectId: string,
+  researchNodeIdsByTsCode: Record<string, string[]> = {},
+): CollectionTarget[] {
   return listResearchProjectCompanies(db, projectId)
     .filter((company) => company.status !== 'excluded')
     .flatMap((company) => {
@@ -117,6 +140,12 @@ function listTargets(db: Database.Database, projectId: string): CollectionTarget
         companyName: company.short_name || company.legal_name,
         securityId: security.id,
         tsCode: security.ts_code,
+        researchNodeId: firstProjectResearchNodeId(
+          db,
+          projectId,
+          security.ts_code,
+          researchNodeIdsByTsCode,
+        ),
       }]
     })
 }
@@ -167,6 +196,7 @@ function ensureProjectMainBusinessExposureCandidates(
         id: stableExposureId(projectId, item.source_fact_key),
         projectId,
         companyId: target.companyId,
+        researchNodeId: target.researchNodeId,
         mainBusinessItemId: item.id,
         sourceKey: item.source_fact_key,
         sourceType: 'fina_mainbz',
@@ -176,6 +206,16 @@ function ensureProjectMainBusinessExposureCandidates(
       }, item.fetched_at)
     }
   })()
+}
+
+export function reconcileIndustryResearchProjectMainBusinessExposures(
+  db: Database.Database,
+  projectId: string,
+  researchNodeIdsByTsCode: Record<string, string[]> = {},
+): void {
+  for (const target of listTargets(db, projectId, researchNodeIdsByTsCode)) {
+    ensureProjectMainBusinessExposureCandidates(db, projectId, target)
+  }
 }
 
 function buildState(
@@ -269,7 +309,7 @@ export async function collectIndustryResearchProjectFinancials(
 ): Promise<ProjectFinancialCollectionState> {
   const now = options.now || Date.now
   const startedAt = now()
-  const targets = listTargets(db, projectId)
+  const targets = listTargets(db, projectId, options.researchNodeIdsByTsCode)
   const emit = (state: ProjectFinancialCollectionState): ProjectFinancialCollectionState => {
     options.onProgress?.(state)
     return state
@@ -331,6 +371,7 @@ export async function collectIndustryResearchProjectFinancials(
         companyId: target.companyId,
         securityId: target.securityId,
         tsCode: target.tsCode,
+        researchNodeId: target.researchNodeId,
         datasets: [dataset],
       }, attemptedAt, options.fetchers)
       processedDatasets += 1

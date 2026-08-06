@@ -45,6 +45,7 @@ export interface IndustryResearchFinancialSyncInput {
   companyId: string
   securityId: string
   tsCode: string
+  researchNodeId?: string | null
   datasets?: IndustryResearchFinancialDataset[]
 }
 
@@ -303,6 +304,7 @@ function saveMainBusinessDataset(
       id: stableId('business_exposure', { projectId: input.projectId, sourceFactKey }),
       projectId: input.projectId,
       companyId: input.companyId,
+      researchNodeId: input.researchNodeId ?? null,
       mainBusinessItemId: itemId,
       sourceKey: sourceFactKey,
       sourceType: 'fina_mainbz',

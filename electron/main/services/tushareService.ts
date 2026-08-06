@@ -2571,7 +2571,7 @@ export interface StockBasicRow {
 /**
  * 拉取全市场股票基础信息（api_name=stock_basic）。
  * 仅请求上市中（list_status=L）的股票，约 5000 条。
- * 每周一 04:00 全量替换 stock_basic_cache 表。
+ * 由18:00协调器和启动过期补偿全量替换 stock_basic_cache 表。
  * 需 2000 积分。
  */
 export async function fetchStockBasic(token: string): Promise<StockBasicRow[]> {

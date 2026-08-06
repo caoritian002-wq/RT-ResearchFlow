@@ -4409,6 +4409,154 @@ const MIGRATIONS: DatabaseMigration[] = [
           '.detail-content|.video-content-left'
         );
     `
+  },
+  {
+    // FR-230: immutable research facts remain protected except inside an explicit project purge transaction.
+    version: 135,
+    sql: `
+      CREATE TABLE industry_research_project_delete_context (
+        project_id TEXT PRIMARY KEY,
+        started_at INTEGER NOT NULL CHECK (started_at > 0)
+      );
+
+      DROP TRIGGER industry_research_snapshots_no_delete;
+      CREATE TRIGGER industry_research_snapshots_no_delete
+        BEFORE DELETE ON industry_research_snapshots
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_SNAPSHOT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_skill_adoptions_no_delete;
+      CREATE TRIGGER industry_research_skill_adoptions_no_delete
+        BEFORE DELETE ON industry_research_skill_adoption_events
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_work_items_no_delete;
+      CREATE TRIGGER industry_research_work_items_no_delete
+        BEFORE DELETE ON industry_research_work_item_versions
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_scenario_sets_no_delete;
+      CREATE TRIGGER industry_research_scenario_sets_no_delete
+        BEFORE DELETE ON industry_research_scenario_set_versions
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_scenarios_no_delete;
+      CREATE TRIGGER industry_research_scenarios_no_delete
+        BEFORE DELETE ON industry_research_scenarios
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM industry_research_project_delete_context AS delete_context
+          INNER JOIN industry_research_scenario_set_versions AS scenario_set
+            ON scenario_set.project_id = delete_context.project_id
+          WHERE scenario_set.id = OLD.scenario_set_version_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_decisions_no_delete;
+      CREATE TRIGGER industry_research_decisions_no_delete
+        BEFORE DELETE ON industry_research_decisions
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_monitoring_items_no_delete;
+      CREATE TRIGGER industry_research_monitoring_items_no_delete
+        BEFORE DELETE ON industry_research_monitoring_item_versions
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_monitoring_observations_no_delete;
+      CREATE TRIGGER industry_research_monitoring_observations_no_delete
+        BEFORE DELETE ON industry_research_monitoring_observations
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_trigger_versions_no_delete;
+      CREATE TRIGGER industry_research_trigger_versions_no_delete
+        BEFORE DELETE ON industry_research_decision_trigger_versions
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_trigger_evaluations_no_delete;
+      CREATE TRIGGER industry_research_trigger_evaluations_no_delete
+        BEFORE DELETE ON industry_research_decision_trigger_evaluations
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_decision_events_no_delete;
+      CREATE TRIGGER industry_research_decision_events_no_delete
+        BEFORE DELETE ON industry_research_decision_events
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_review_events_no_delete;
+      CREATE TRIGGER industry_research_review_events_no_delete
+        BEFORE DELETE ON industry_research_review_events
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_market_sync_runs_no_delete;
+      CREATE TRIGGER industry_research_market_sync_runs_no_delete
+        BEFORE DELETE ON industry_research_market_sync_runs
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_market_snapshots_no_delete;
+      CREATE TRIGGER industry_research_market_snapshots_no_delete
+        BEFORE DELETE ON industry_research_market_snapshots
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+
+      DROP TRIGGER industry_research_valuation_snapshots_no_delete;
+      CREATE TRIGGER industry_research_valuation_snapshots_no_delete
+        BEFORE DELETE ON industry_research_valuation_snapshots
+        WHEN NOT EXISTS (
+          SELECT 1 FROM industry_research_project_delete_context
+          WHERE project_id = OLD.project_id
+        )
+        BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
+    `
   }
 ]
 

@@ -1,7 +1,12 @@
 import Database from 'better-sqlite3'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { runMigrations } from '../../electron/main/database/db'
-import { createResearchProject } from '../../electron/main/database/industryResearchRepository'
+import {
+  createResearchProject,
+  deleteResearchProject,
+  getResearchProject,
+  updateResearchProject,
+} from '../../electron/main/database/industryResearchRepository'
 import {
   listResearchFinancialFacts,
   listResearchFinancialTimelineFacts,
@@ -87,6 +92,35 @@ describe('产业研究公司与财务事实仓库', () => {
       exclusionReason: '不属于当前研究范围',
     }, 140)
     expect(listResearchProjectStockCodes(db, 'project-1')).toEqual([])
+  })
+
+  it('永久删除归档项目时保留共享公司、证券、财务事实和公告证据', () => {
+    saveResearchSecurity(db, {
+      id: 'security-a', companyId: 'company-1', tsCode: '600001.SH', exchange: 'SSE',
+      securityType: 'A_SHARE', mappingSource: 'tushare',
+    }, 110)
+    saveResearchProjectCompany(db, {
+      projectId: 'project-1', companyId: 'company-1', status: 'candidate',
+    }, 120)
+    saveResearchFinancialFacts(db, [{
+      id: 'fact-1', companyId: 'company-1', securityId: 'security-a', sourceApi: 'income',
+      sourceFactKey: 'income-1', sourceVersion: 'v1', metricName: 'revenue', metricValue: 100,
+      reportPeriod: '20241231', fetchedAt: 130,
+    }], 130)
+    saveResearchDisclosureEvidence(db, {
+      id: 'disclosure-1', companyId: 'company-1', projectId: 'project-1', title: '年度报告',
+      sourceUrl: 'https://example.com/annual-report.pdf', createdBy: 'human', primarySourceConfirmed: true,
+    }, 140)
+    updateResearchProject(db, 'project-1', { status: 'archived' })
+
+    expect(deleteResearchProject(db, 'project-1')).toBe(true)
+    expect(getResearchProject(db, 'project-1')).toBeNull()
+    expect(db.prepare('SELECT id FROM industry_research_companies WHERE id = ?').get('company-1')).toEqual({ id: 'company-1' })
+    expect(db.prepare('SELECT id FROM industry_research_securities WHERE id = ?').get('security-a')).toEqual({ id: 'security-a' })
+    expect(db.prepare('SELECT id FROM industry_research_financial_facts WHERE id = ?').get('fact-1')).toEqual({ id: 'fact-1' })
+    expect(db.prepare('SELECT project_id FROM industry_research_disclosure_evidence WHERE id = ?').get('disclosure-1'))
+      .toEqual({ project_id: null })
+    expect(listResearchProjectCompanies(db, 'project-1')).toEqual([])
   })
 
   it('相同来源版本幂等且新修订版本不会覆盖旧事实', () => {

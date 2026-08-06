@@ -103,6 +103,9 @@ describe('产业研究公司财务前端模型', () => {
     expect(formatFinancialMetricValue('forecast', {
       factId: 'forecast-min', name: 'net_profit_min', value: 6_236.16, textValue: null, unit: null, currency: null,
     })).toBe('6,236.16万元')
+    expect(formatFinancialMetricValue('fina_audit', {
+      factId: 'audit-fees', name: 'audit_fees', value: 1_380_000, textValue: null, unit: null, currency: null,
+    })).toBe('138万元')
     expect(formatFinancialMetricValue('fina_indicator', {
       factId: 'ocf-ratio', name: 'ocf_to_or', value: 0.126, textValue: null, unit: null, currency: null,
     })).toBe('12.6%')

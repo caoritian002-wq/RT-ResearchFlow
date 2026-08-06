@@ -55,6 +55,26 @@ describe('18:00统一盘后调度契约', () => {
     expect(coordinator).toContain('runPremarketOutcomeValidation(db, tradeDate)')
   })
 
+  it('证券主数据独立于题材源接入18点协调器并提供启动过期补偿', () => {
+    const coordinator = scheduler.slice(
+      scheduler.indexOf('export function runUnifiedAfterCloseSyncJob'),
+      scheduler.indexOf('export function scheduleAfterCloseDailySync'),
+    )
+    expect(coordinator).toContain("runTrackedAfterCloseTask(tradeDate, 'security_master'")
+    expect(coordinator.indexOf("'security_master'")).toBeLessThan(coordinator.indexOf("'market_daily'"))
+
+    const conceptSync = scheduler.slice(
+      scheduler.indexOf('export async function runConceptMembersSyncForSource'),
+      scheduler.indexOf('export interface StockBasicSyncResult'),
+    )
+    expect(conceptSync).not.toContain('runStockBasicSyncJob()')
+    expect(scheduler).toContain('runStartupStockBasicSyncIfStale()')
+    expect(scheduler).toContain('if (_stockBasicSyncPromise) return _stockBasicSyncPromise')
+    expect(scheduler).toContain("remapUnmatchedIndustryResearchCompanyCandidates(getDb())")
+    expect(scheduler).toContain('.sort((left, right) => right.localeCompare(left))[0] ?? null')
+    expect(scheduler).not.toContain("reverse().find(r => r.isOpen === 1)?.calDate")
+  })
+
   it('盘前通知在09:28确认版之后于09:29执行并只允许五分钟启动收敛', () => {
     expect(scheduler).toContain('PREMARKET_NOTIFICATION_HOUR_BJ = 9')
     expect(scheduler).toContain('PREMARKET_NOTIFICATION_MINUTE_BJ = 29')

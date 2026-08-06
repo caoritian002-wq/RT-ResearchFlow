@@ -24,6 +24,7 @@ describe('afterCloseSyncRepository', () => {
     const started = beginAfterCloseSyncRun(db, '20260730', 'scheduled', 1_000)
     expect(started).toMatchObject({ tradeDate: '20260730', status: 'running', attemptCount: 1 })
 
+    updateAfterCloseSyncTask(db, '20260730', 'security_master', 'completed', '5532只', 1_050)
     updateAfterCloseSyncTask(db, '20260730', 'market_daily', 'running', null, 1_100)
     updateAfterCloseSyncTask(db, '20260730', 'market_daily', 'completed', '5532只', 1_200)
     const completed = completeAfterCloseSyncRun(db, '20260730', 'completed', null, 1_300)
@@ -34,6 +35,7 @@ describe('afterCloseSyncRepository', () => {
       completedAt: 1_200,
       message: '5532只',
     })
+    expect(completed.tasks.security_master?.status).toBe('completed')
     expect(getLatestAfterCloseSyncRun(db)?.status).toBe('completed')
     expect(shouldStartAfterCloseSyncRun(completed, 99_999_999)).toBe(false)
   })

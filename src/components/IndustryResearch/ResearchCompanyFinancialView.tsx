@@ -71,9 +71,11 @@ function defaultBridgeKey(companyId: string): string {
 interface Props {
   project: ResearchProject
   graph: ResearchGraph | null
+  onExpandCompanies?: () => Promise<string | null>
+  dataRevision?: number | null
 }
 
-export function ResearchCompanyFinancialView({ project, graph }: Props): React.ReactElement {
+export function ResearchCompanyFinancialView({ project, graph, onExpandCompanies, dataRevision }: Props): React.ReactElement {
   const [companies, setCompanies] = useState<ResearchCompany[]>([])
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null)
   const [selectedSecurityId, setSelectedSecurityId] = useState<string | null>(null)
@@ -97,6 +99,7 @@ export function ResearchCompanyFinancialView({ project, graph }: Props): React.R
   const [loadingFacts, setLoadingFacts] = useState(false)
   const [saving, setSaving] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [expandingCompanies, setExpandingCompanies] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const requestIdRef = useRef(0)
@@ -139,7 +142,7 @@ export function ResearchCompanyFinancialView({ project, graph }: Props): React.R
     companyListRequestIdRef.current += 1
     setSelectedCompanyId(null); setSelectedSecurityId(null); setDialog(null); clearFacts(); setError(null); setNotice(null)
     void loadCompanies()
-  }, [clearFacts, loadCompanies, project.id])
+  }, [clearFacts, dataRevision, loadCompanies, project.id])
 
   useEffect(() => {
     const nextSecurityId = selectedCompany?.securities[0]?.id ?? null
@@ -278,9 +281,24 @@ export function ResearchCompanyFinancialView({ project, graph }: Props): React.R
     }
   }, [activeBridgeKey, loadCompanyFacts, project.id, selectedCompany, selectedSecurity, syncDatasets])
 
+  const expandCompanies = useCallback(async () => {
+    if (!onExpandCompanies || expandingCompanies) return
+    setExpandingCompanies(true); setError(null); setNotice(null)
+    try {
+      const message = await onExpandCompanies()
+      if (!message) return
+      await loadCompanies(selectedCompanyId)
+      setNotice(message)
+    } catch (expandError) {
+      setError(expandError instanceof Error ? expandError.message : '公司映射补全失败')
+    } finally {
+      setExpandingCompanies(false)
+    }
+  }, [expandingCompanies, loadCompanies, onExpandCompanies, selectedCompanyId])
+
   return <div data-testid="industry-research-company-financial" className="flex min-h-[560px] flex-col overflow-hidden rounded-md border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900 lg:h-full lg:min-h-0 lg:flex-row">
     <aside data-testid="industry-research-company-list" className="w-full shrink-0 border-b border-slate-200 bg-slate-50/80 dark:border-slate-800 dark:bg-slate-950/40 lg:w-64 lg:border-b-0 lg:border-r">
-      <div className="border-b border-slate-200 p-3 dark:border-slate-800"><div className="flex items-center justify-between gap-2"><div><div className="text-xs font-semibold">项目公司</div><div className="mt-0.5 text-[10px] text-slate-400">{companies.length} 家实体</div></div><button type="button" onClick={() => openCompany()} className="rounded-md bg-slate-900 px-2.5 py-1.5 text-xs text-white dark:bg-slate-100 dark:text-slate-900">登记</button></div><input data-testid="industry-research-company-search" value={query} onChange={event => setQuery(event.target.value)} className="research-input mt-3" placeholder="搜索公司或代码" /></div>
+      <div className="border-b border-slate-200 p-3 dark:border-slate-800"><div className="flex items-center justify-between gap-2"><div><div className="text-xs font-semibold">项目公司</div><div className="mt-0.5 text-[10px] text-slate-400">{companies.length} 家实体</div></div><div className="flex items-center gap-1.5"><button type="button" data-testid="industry-research-expand-companies" disabled={!onExpandCompanies || expandingCompanies} onClick={() => void expandCompanies()} className="h-8 rounded-md border border-slate-300 px-2 text-[11px] font-medium text-slate-600 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300">{expandingCompanies ? '启动中' : '补全链路'}</button><button type="button" onClick={() => openCompany()} className="h-8 rounded-md bg-slate-900 px-2.5 text-xs text-white dark:bg-slate-100 dark:text-slate-900">登记</button></div></div><input data-testid="industry-research-company-search" value={query} onChange={event => setQuery(event.target.value)} className="research-input mt-3" placeholder="搜索公司或代码" /></div>
       <div className="max-h-52 overflow-y-auto p-2 lg:max-h-none lg:h-[calc(100%-105px)]">{loadingCompanies ? <div className="p-4 text-center text-xs text-slate-400">正在读取公司</div> : visibleCompanies.length ? visibleCompanies.map(company => <button key={company.companyId} type="button" data-testid={`industry-research-company-${company.companyId}`} data-trend-score={company.trendScore ?? ''} aria-pressed={selectedCompanyId === company.companyId} onClick={() => setSelectedCompanyId(company.companyId)} className={`mb-1 w-full rounded-md border px-3 py-2 text-left ${selectedCompanyId === company.companyId ? 'border-cyan-300 bg-cyan-50 dark:border-cyan-800 dark:bg-cyan-950/20' : 'border-transparent hover:bg-white dark:hover:bg-slate-900'}`}><div className="flex items-start justify-between gap-2"><span className="min-w-0 truncate text-sm font-medium">{company.displayName}</span><span className="shrink-0 text-right"><span className="block text-[10px] text-slate-400">{COMPANY_STATUS_LABELS[company.status]}</span>{company.trendScore != null && <span data-testid={`industry-research-company-score-${company.companyId}`} className="mt-0.5 block text-[10px] font-semibold tabular-nums text-cyan-700 dark:text-cyan-300">综合分 {Math.round(company.trendScore)}</span>}</span></div><div className="mt-1 truncate font-mono text-[10px] text-slate-400">{company.securities.map(item => item.tsCode).join(' · ') || '未映射证券'}</div></button>) : <div className="p-5 text-center text-xs leading-5 text-slate-400">尚未登记项目公司。推荐先建立公司实体与证券映射。</div>}</div>
     </aside>
     <section data-testid="industry-research-company-detail" className="flex min-h-0 min-w-0 flex-1 flex-col">

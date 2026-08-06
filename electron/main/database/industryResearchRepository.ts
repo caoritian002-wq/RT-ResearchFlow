@@ -41,6 +41,12 @@ export interface ResearchProjectInput {
   stopCondition?: string | null
 }
 
+export class IndustryResearchProjectDeletionError extends Error {
+  constructor(public readonly code: 'PROJECT_DELETE_BUSY' | 'PROJECT_DELETE_INTEGRITY_FAILED', message: string) {
+    super(message)
+  }
+}
+
 export interface ResearchNodeInput {
   id: string
   type: IndustryResearchNodeType
@@ -210,49 +216,221 @@ export function updateResearchProject(
   return getResearchProject(db, projectId)
 }
 
+function assertResearchProjectCanBeDeleted(db: Database.Database, projectId: string): void {
+  const activeGeneration = db.prepare(`
+    SELECT 1 AS found
+    FROM industry_research_generation_runs
+    WHERE project_id = ? AND status IN ('queued', 'running')
+    LIMIT 1
+  `).get(projectId) as { found: number } | undefined
+  if (activeGeneration) {
+    throw new IndustryResearchProjectDeletionError(
+      'PROJECT_DELETE_BUSY',
+      '项目仍有进行中的产业研究生成，请先取消或等待完成后再删除',
+    )
+  }
+
+  const activeMarketSync = db.prepare(`
+    SELECT 1 AS found
+    FROM industry_research_market_sync_runs
+    WHERE project_id = ? AND status = 'running'
+    LIMIT 1
+  `).get(projectId) as { found: number } | undefined
+  if (activeMarketSync) {
+    throw new IndustryResearchProjectDeletionError(
+      'PROJECT_DELETE_BUSY',
+      '项目仍有进行中的行情同步，请等待完成后再删除',
+    )
+  }
+
+  const activeDeepResearch = db.prepare(`
+    SELECT 1 AS found
+    FROM research_agent_runs AS run
+    WHERE run.status IN ('queued', 'running')
+      AND EXISTS (
+        SELECT 1
+        FROM json_each(run.subjects_json) AS subject
+        WHERE json_extract(subject.value, '$.kind') = 'industry_project'
+          AND json_extract(subject.value, '$.id') = ?
+      )
+    LIMIT 1
+  `).get(projectId) as { found: number } | undefined
+  if (activeDeepResearch) {
+    throw new IndustryResearchProjectDeletionError(
+      'PROJECT_DELETE_BUSY',
+      '项目仍有进行中的深度研究，请先取消或等待完成后再删除',
+    )
+  }
+}
+
+function deletePreviousLinkedProjectRows(
+  db: Database.Database,
+  tableName: string,
+  previousColumn: string,
+  projectId: string,
+): void {
+  const countStatement = db.prepare(`SELECT COUNT(*) AS count FROM ${tableName} WHERE project_id = ?`)
+  const deleteLeaves = db.prepare(`
+    DELETE FROM ${tableName}
+    WHERE id IN (
+      SELECT current.id
+      FROM ${tableName} AS current
+      LEFT JOIN ${tableName} AS child ON child.${previousColumn} = current.id
+      WHERE current.project_id = @projectId AND child.id IS NULL
+    )
+  `)
+
+  while (true) {
+    const remaining = (countStatement.get(projectId) as { count: number }).count
+    if (remaining === 0) return
+    if (deleteLeaves.run({ projectId }).changes === 0) {
+      throw new IndustryResearchProjectDeletionError(
+        'PROJECT_DELETE_INTEGRITY_FAILED',
+        '项目版本链存在无法安全清理的关联，请重启应用后重试',
+      )
+    }
+  }
+}
+
+function deleteResearchProjectInsideTransaction(db: Database.Database, projectId: string): boolean {
+  if (!getResearchProject(db, projectId)) return false
+
+  db.prepare(`
+    INSERT INTO industry_research_project_delete_context (project_id, started_at)
+    VALUES (?, ?)
+  `).run(projectId, Date.now())
+
+  db.prepare(`
+    UPDATE ai_research_discussion_contexts
+    SET project_id = NULL,
+        base_snapshot_id = NULL,
+        base_selection_reason = 'unassigned',
+        latest_batch_id = CASE
+          WHEN latest_batch_id IN (
+            SELECT id FROM industry_research_candidate_batches WHERE project_id = @projectId
+          ) THEN NULL
+          ELSE latest_batch_id
+        END,
+        origin_available = CASE
+          WHEN origin_type = 'industry_research' AND origin_id = @projectId THEN 0
+          ELSE origin_available
+        END,
+        updated_at = @updatedAt
+    WHERE project_id = @projectId
+       OR (origin_type = 'industry_research' AND origin_id = @projectId)
+       OR latest_batch_id IN (
+         SELECT id FROM industry_research_candidate_batches WHERE project_id = @projectId
+       )
+  `).run({ projectId, updatedAt: Date.now() })
+  db.prepare('UPDATE industry_research_disclosure_evidence SET project_id = NULL WHERE project_id = ?').run(projectId)
+
+  deletePreviousLinkedProjectRows(db, 'industry_research_decision_events', 'previous_event_id', projectId)
+  deletePreviousLinkedProjectRows(db, 'industry_research_review_events', 'previous_event_id', projectId)
+  db.prepare('DELETE FROM industry_research_decision_trigger_evaluations WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_valuation_snapshots WHERE project_id = ?').run(projectId)
+  deletePreviousLinkedProjectRows(db, 'industry_research_decision_trigger_versions', 'previous_version_id', projectId)
+  db.prepare('DELETE FROM industry_research_monitoring_observations WHERE project_id = ?').run(projectId)
+  deletePreviousLinkedProjectRows(db, 'industry_research_monitoring_item_versions', 'previous_version_id', projectId)
+  db.prepare('DELETE FROM industry_research_decisions WHERE project_id = ?').run(projectId)
+  db.prepare(`
+    DELETE FROM industry_research_scenarios
+    WHERE scenario_set_version_id IN (
+      SELECT id FROM industry_research_scenario_set_versions WHERE project_id = ?
+    )
+  `).run(projectId)
+  deletePreviousLinkedProjectRows(db, 'industry_research_scenario_set_versions', 'previous_version_id', projectId)
+  deletePreviousLinkedProjectRows(db, 'industry_research_work_item_versions', 'previous_version_id', projectId)
+  db.prepare('DELETE FROM industry_research_skill_adoption_events WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_market_sync_runs WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_market_snapshots WHERE project_id = ?').run(projectId)
+  deletePreviousLinkedProjectRows(db, 'industry_research_snapshots', 'previous_snapshot_id', projectId)
+
+  db.prepare(`
+    DELETE FROM industry_research_profit_bridge_items
+    WHERE profit_bridge_id IN (
+      SELECT id FROM industry_research_profit_bridges WHERE project_id = ?
+    )
+  `).run(projectId)
+  deletePreviousLinkedProjectRows(db, 'industry_research_profit_bridges', 'previous_version_id', projectId)
+
+  db.prepare('DELETE FROM industry_research_external_refs WHERE project_id = ?').run(projectId)
+  db.prepare(`
+    DELETE FROM industry_research_change_candidates
+    WHERE project_id = @projectId
+       OR batch_id IN (
+         SELECT id FROM industry_research_candidate_batches WHERE project_id = @projectId
+       )
+  `).run({ projectId })
+  db.prepare(`
+    DELETE FROM industry_research_change_sets
+    WHERE batch_id IN (
+      SELECT id FROM industry_research_candidate_batches WHERE project_id = ?
+    )
+  `).run(projectId)
+  db.prepare('DELETE FROM industry_research_candidate_batches WHERE project_id = ?').run(projectId)
+
+  db.prepare('DELETE FROM industry_research_company_candidates WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM research_evidence_candidates WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_generation_runs WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_hypothesis_events WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_edges WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_business_exposures WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_project_companies WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_evidence WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_hypotheses WHERE project_id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_nodes WHERE project_id = ?').run(projectId)
+
+  const result = db.prepare('DELETE FROM industry_research_projects WHERE id = ?').run(projectId)
+  db.prepare('DELETE FROM industry_research_project_delete_context WHERE project_id = ?').run(projectId)
+  return result.changes > 0
+}
+
+function throwProjectDeletionFailure(error: unknown): never {
+  if (error instanceof IndustryResearchProjectDeletionError) throw error
+  throw new IndustryResearchProjectDeletionError(
+    'PROJECT_DELETE_INTEGRITY_FAILED',
+    '项目数据存在无法安全清理的关联，未删除任何内容，请重启应用后重试',
+  )
+}
+
 /**
- * 物理删除研究项目及其项目级事实。
- * 共享公司、证券、财务事实、公告证据不删除；公告证据的 project_id 由 FK 置空。
+ * 物理删除研究项目及其项目级事实与不可变版本。
+ * 共享公司、证券、财务事实、公告证据、Skill快照和研究讨论保留。
  */
 export function deleteResearchProject(db: Database.Database, projectId: string): boolean {
-  const project = getResearchProject(db, projectId)
-  if (!project) return false
-  const snapshotTable = db.prepare(`
-    SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'industry_research_snapshots'
-  `).get() as { found: number } | undefined
-  if (snapshotTable) {
-    const protectedVersion = db.prepare('SELECT 1 AS found FROM industry_research_snapshots WHERE project_id = ? LIMIT 1')
-      .get(projectId) as { found: number } | undefined
-    if (protectedVersion) throw new Error('SNAPSHOT_PROTECTED')
+  const transaction = db.transaction(() => {
+    if (!getResearchProject(db, projectId)) return false
+    assertResearchProjectCanBeDeleted(db, projectId)
+    return deleteResearchProjectInsideTransaction(db, projectId)
+  })
+  try {
+    return transaction()
+  } catch (error) {
+    throwProjectDeletionFailure(error)
   }
-  const result = db.prepare('DELETE FROM industry_research_projects WHERE id = ?').run(projectId)
-  return result.changes > 0
 }
 
 export function deleteResearchProjects(
   db: Database.Database,
   options: { projectIds?: string[]; all?: boolean },
 ): { deletedIds: string[]; deletedCount: number } {
-  if (options.all) {
-    const rows = db.prepare('SELECT id FROM industry_research_projects').all() as Array<{ id: string }>
-    const deletedIds: string[] = []
-    const tx = db.transaction(() => {
-      for (const row of rows) {
-        if (deleteResearchProject(db, row.id)) deletedIds.push(row.id)
-      }
-    })
-    tx()
-    return { deletedIds, deletedCount: deletedIds.length }
-  }
-
-  const ids = Array.from(new Set((options.projectIds ?? []).map((id) => id.trim()).filter(Boolean)))
+  const ids = options.all
+    ? (db.prepare('SELECT id FROM industry_research_projects').all() as Array<{ id: string }>).map((row) => row.id)
+    : Array.from(new Set((options.projectIds ?? []).map((id) => id.trim()).filter(Boolean)))
   const deletedIds: string[] = []
   const tx = db.transaction(() => {
     for (const projectId of ids) {
-      if (deleteResearchProject(db, projectId)) deletedIds.push(projectId)
+      if (getResearchProject(db, projectId)) assertResearchProjectCanBeDeleted(db, projectId)
+    }
+    for (const projectId of ids) {
+      if (deleteResearchProjectInsideTransaction(db, projectId)) deletedIds.push(projectId)
     }
   })
-  tx()
+  try {
+    tx()
+  } catch (error) {
+    throwProjectDeletionFailure(error)
+  }
   return { deletedIds, deletedCount: deletedIds.length }
 }
 

@@ -52,7 +52,6 @@ interface Props {
   provisionalReport?: boolean
   evidenceActionId?: string | null
   changeRefreshToken?: number
-  hasSnapshots?: boolean
   discussionLabel?: string
   discussionBusy?: boolean
   scrollRef?: React.RefObject<HTMLDivElement>
@@ -63,13 +62,14 @@ interface Props {
   onImportArchive: () => void
   onOpenSnapshots: () => void
   onResearchChanged: () => void
-  onSnapshotCountChange: (count: number) => void
   onEditProject: () => void
   onArchive: () => void
   onDelete: () => void
   onEditGraph: () => void
   onConfirmEvidence?: (candidateId: string, action: 'confirm' | 'reject') => void
   onResolveCompany?: (candidate: ResearchCompanyCandidateView, action: 'accept' | 'exclude') => void
+  onExpandCompanies?: () => Promise<string | null>
+  companyDataRevision?: number | null
   decisionContext?: { view: ResearchDecisionView; companyId: string | null; securityId: string | null }
   onDecisionContextChange?: (state: { view: ResearchDecisionView; companyId: string | null; securityId: string | null }) => void
 }
@@ -198,7 +198,6 @@ export function ResearchWorkspace({
   provisionalReport = false,
   evidenceActionId = null,
   changeRefreshToken = 0,
-  hasSnapshots = false,
   discussionLabel = '和 AI 讨论',
   discussionBusy = false,
   scrollRef,
@@ -209,13 +208,14 @@ export function ResearchWorkspace({
   onImportArchive,
   onOpenSnapshots,
   onResearchChanged,
-  onSnapshotCountChange,
   onEditProject,
   onArchive,
   onDelete,
   onEditGraph,
   onConfirmEvidence,
   onResolveCompany,
+  onExpandCompanies,
+  companyDataRevision,
   decisionContext,
   onDecisionContextChange,
 }: Props): React.ReactElement {
@@ -251,7 +251,7 @@ export function ResearchWorkspace({
             </div>
           </div>
           <button type="button" data-testid="industry-research-discuss" onClick={onStartDiscussion} disabled={discussionBusy} className="h-8 shrink-0 rounded-md bg-cyan-700 px-3 text-xs font-semibold text-white transition-colors hover:bg-cyan-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40">{discussionBusy ? '打开中…' : discussionLabel}</button>
-          <ProjectActionMenu hasSnapshots={hasSnapshots} onEdit={onEditProject} onArchive={onArchive} onDelete={onDelete} />
+          <ProjectActionMenu onEdit={onEditProject} onArchive={onArchive} onDelete={onDelete} />
         </div>
         <div className="-mx-1 flex h-9 min-w-0 items-stretch gap-0.5 overflow-x-auto border-t border-slate-100 dark:border-slate-800" role="tablist" aria-label="产业研究视图">
           {viewLabels.map(([key, label]) => (
@@ -354,7 +354,6 @@ export function ResearchWorkspace({
             onOpenDiscussion={onOpenDiscussion}
             onImportArchive={onImportArchive}
             onOpenSnapshots={onOpenSnapshots}
-            onSnapshotCountChange={onSnapshotCountChange}
           />
         )}
         {!loading && view === 'decision' && (
@@ -381,7 +380,14 @@ export function ResearchWorkspace({
             onGoCompanies={() => onViewChange('companies')}
           />
         )}
-        {!loading && view === 'companies' && <ResearchCompanyFinancialView project={project} graph={graph} />}
+        {!loading && view === 'companies' && (
+          <ResearchCompanyFinancialView
+            project={project}
+            graph={graph}
+            onExpandCompanies={onExpandCompanies}
+            dataRevision={companyDataRevision}
+          />
+        )}
         {!loading && view === 'graph' && provisionalReport && (!graph || graph.nodes.length === 0) ? (
           <section data-testid="industry-research-provisional-graph" role="status" className="border border-amber-200 bg-amber-50 px-4 py-5 text-amber-900 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-200">
             <h3 className="text-sm font-semibold">图谱内容已生成，正在等待写回项目</h3>
@@ -412,8 +418,7 @@ export function ResearchWorkspace({
   )
 }
 
-function ProjectActionMenu({ hasSnapshots, onEdit, onArchive, onDelete }: {
-  hasSnapshots: boolean
+function ProjectActionMenu({ onEdit, onArchive, onDelete }: {
   onEdit: () => void
   onArchive: () => void
   onDelete: () => void
@@ -460,7 +465,7 @@ function ProjectActionMenu({ hasSnapshots, onEdit, onArchive, onDelete }: {
           <button type="button" role="menuitem" onClick={() => invoke(onEdit)} className="flex min-h-9 w-full items-center rounded px-2.5 text-left hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:hover:bg-slate-800">编辑研究边界</button>
           <button type="button" role="menuitem" onClick={() => invoke(onArchive)} className="flex min-h-9 w-full items-center rounded px-2.5 text-left text-amber-700 hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:text-amber-300 dark:hover:bg-amber-950/30">归档项目</button>
           <div className="my-1 border-t border-slate-100 dark:border-slate-800" />
-          <button type="button" role="menuitem" onClick={() => invoke(onDelete)} disabled={hasSnapshots} title={hasSnapshots ? '已有研究版本的项目只能归档，不能物理删除' : undefined} className="flex min-h-9 w-full items-center rounded px-2.5 text-left text-red-600 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-40 dark:text-red-300 dark:hover:bg-red-950/30">删除项目</button>
+          <button type="button" role="menuitem" onClick={() => invoke(onDelete)} className="flex min-h-9 w-full items-center rounded px-2.5 text-left text-red-600 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 dark:text-red-300 dark:hover:bg-red-950/30">删除项目</button>
         </div>
       )}
     </div>

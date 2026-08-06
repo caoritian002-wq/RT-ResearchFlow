@@ -57,6 +57,14 @@ export interface GenerationRunView {
   } | null
   reportDocument?: ResearchGeneratedReportDocument | null
   financialCollection?: ProjectFinancialCollectionView | null
+  companyExpansion?: {
+    chainVersion?: number
+    status?: 'queued' | 'running' | 'reporting' | 'succeeded' | 'partial'
+    sourceRunId?: string
+    targetCompanies?: number
+    projectedNodes?: number
+    projectedEdges?: number
+  } | null
   createdAt?: number
   startedAt?: number | null
   updatedAt?: number
@@ -116,6 +124,8 @@ export function ResearchGenerationStatus({ run, busy, onCancel, onRetry, onConti
   if (!run) return null
   const isActive = ['queued', 'running'].includes(run.status)
   const financialCollection = run.financialCollection
+  const isCompanyExpansion = run.companyExpansion?.chainVersion === 2
+  const runLabel = isCompanyExpansion ? '链路补全' : 'AI 研究'
   const stageProgress = buildResearchStageProgress({
     status: run.status,
     stage: run.currentStage,
@@ -175,7 +185,7 @@ export function ResearchGenerationStatus({ run, busy, onCancel, onRetry, onConti
       <section data-testid="industry-research-generation-complete" className="min-w-0">
         <div className="flex min-h-8 items-center gap-2 text-[11px]">
           <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
-          <span className="shrink-0 font-semibold text-emerald-700 dark:text-emerald-300">AI 研究已完成</span>
+          <span className="shrink-0 font-semibold text-emerald-700 dark:text-emerald-300">{runLabel}已完成</span>
           <span className="min-w-0 flex-1 truncate text-slate-600 dark:text-slate-300" title={run.researchQuestion}>{run.researchQuestion}</span>
           {mode && <span className={`shrink-0 rounded px-1.5 py-0.5 font-semibold ${mode.className}`} title={showWeakConfig ? weakSearchMessage : mode.hint}>{mode.label}</span>}
           {financialCollection && (
@@ -215,6 +225,7 @@ export function ResearchGenerationStatus({ run, busy, onCancel, onRetry, onConti
             <span>来源：候选 {plan?.candidatePoolSize ?? 0} / 代表 {plan?.selectedTopN ?? 0}</span>
             <span>检索：本地 {plan?.localHitCount ?? 0} / 外网 {plan?.webHitCount ?? 0}</span>
             <span>完成阶段：{stageLabel}</span>
+            {isCompanyExpansion && <span>链路：{run.companyExpansion?.targetCompanies ?? 0} 家公司 · 新增图谱 {run.companyExpansion?.projectedNodes ?? 0} 节点/{run.companyExpansion?.projectedEdges ?? 0} 关系</span>}
             {financialCollection && <span>公司财务：覆盖 {financialCollection.coveredDatasets}/{financialCollection.totalDatasets} · 失败 {financialCollection.failedDatasets}</span>}
           </div>
         )}
@@ -226,7 +237,7 @@ export function ResearchGenerationStatus({ run, busy, onCancel, onRetry, onConti
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[11px] font-semibold text-cyan-700 dark:text-cyan-300">AI 研究</span>
+            <span className="text-[11px] font-semibold text-cyan-700 dark:text-cyan-300">{runLabel}</span>
             <span className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">{run.researchQuestion}</span>
             {mode && (
               <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${mode.className}`} title={mode.hint}>

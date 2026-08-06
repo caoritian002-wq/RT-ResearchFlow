@@ -11,9 +11,11 @@ import {
   getLatestSuccessfulGenerationRun,
   listCompanyCandidates,
   listEvidenceCandidates,
+  listRemappableUnmatchedCompanyCandidates,
   requestCancelGenerationRun,
   updateCompanyCandidateResolution,
   updateGenerationRun,
+  updateUnmatchedCompanyCandidateMatches,
   upsertCompanyCandidate,
   type GenerationRunCreateInput,
 } from '../database/industryResearchGenerationRepository'
@@ -50,8 +52,10 @@ import { callWithFallback } from './aiFallbackService'
 import { IndustryResearchError } from './industryResearchError'
 import {
   collectIndustryResearchProjectFinancials,
+  reconcileIndustryResearchProjectMainBusinessExposures,
   type ProjectFinancialCollectionState,
 } from './industryResearchFinancialCollectionService'
+import type { IndustryResearchFinancialFetchers } from './industryResearchFinancialSyncService'
 import { runOpenAINativeResearchSearch } from './industryResearchNativeWebSearchService'
 import {
   confirmProjectEvidenceCandidate,
@@ -116,15 +120,21 @@ type ProgressEmitter = (payload: {
 
 const activeGenerationRunIds = new Set<string>()
 
+interface GenerationFinancialOptions {
+  token?: string | null
+  fetchers?: IndustryResearchFinancialFetchers
+}
+
 function launchGenerationPipeline(
   db: Database.Database,
   runId: string,
   skill: SkillMeta,
   emitter?: ProgressEmitter,
   resumeAfterCompanies = false,
+  financialOptions?: GenerationFinancialOptions,
 ): void {
   activeGenerationRunIds.add(runId)
-  void runGenerationPipeline(db, runId, skill, emitter, resumeAfterCompanies)
+  void runGenerationPipeline(db, runId, skill, emitter, resumeAfterCompanies, financialOptions)
     .finally(() => activeGenerationRunIds.delete(runId))
 }
 
@@ -222,9 +232,11 @@ function compactHypothesesForWriting(hypotheses: unknown): string[] {
 }
 
 function compactCompaniesForWriting(companies: unknown): string[] {
-  const payload = (companies && typeof companies === 'object') ? companies as { items?: unknown[] } : {}
+  const payload = (companies && typeof companies === 'object')
+    ? companies as { items?: unknown[]; coverage?: { targets?: unknown[] } }
+    : {}
   const items = Array.isArray(payload.items) ? payload.items : []
-  return items.slice(0, 15).map((item) => {
+  const rows = items.slice(0, 20).map((item) => {
     const row = item as Record<string, unknown>
     const name = asString(row.displayName, 80) || asString(row.legalNameCandidate, 80)
     const rationale = asString(row.rationale, 200)
@@ -232,6 +244,18 @@ function compactCompaniesForWriting(companies: unknown): string[] {
     if (!name) return ''
     return `${name}${tsCode ? `（${tsCode}）` : ''}${rationale ? `：${rationale}` : ''}`
   }).filter(Boolean)
+  const coverageTargets = Array.isArray(payload.coverage?.targets) ? payload.coverage.targets : []
+  const gaps = coverageTargets.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const row = item as Record<string, unknown>
+    const status = asString(row.status, 40)
+    const name = asString(row.nodeName, 100)
+    const reason = asString(row.reason, 180)
+    return status === 'uncovered' && name
+      ? [`覆盖缺口：${name}${reason ? `（${reason}）` : ''}`]
+      : []
+  }).slice(0, 8)
+  return [...rows, ...gaps]
 }
 
 const REPORT_FINANCIAL_METRICS = new Set([
@@ -914,6 +938,39 @@ function normalizeHypothesisArtifact(payload: Record<string, unknown>, allowedCa
   }>
 }
 
+interface NormalizedCompanyArtifact {
+  legalNameCandidate: string
+  displayName: string
+  rationale: string
+  researchNodeIds: string[]
+  tsCodeHint: string | null
+  candidateIds: string[]
+  noEvidenceSupport: boolean
+}
+
+interface CompanyCoverageTarget {
+  nodeId: string
+  nodeName: string
+  stage: string | null
+}
+
+interface CompanyCoverageAudit {
+  status: 'complete' | 'incomplete' | 'not_applicable'
+  targetMinimum: number
+  activeAShareCount: number
+  targets: Array<CompanyCoverageTarget & {
+    status: 'covered' | 'uncovered'
+    companyNames: string[]
+    reason: string | null
+  }>
+}
+
+interface LocalSecurityCandidate {
+  tsCode: string
+  name: string
+  industry: string | null
+}
+
 function normalizeCompanyArtifact(payload: Record<string, unknown>, allowedCandidateIds: Set<string>) {
   const items = Array.isArray(payload.companies) ? payload.companies.slice(0, 30) : []
   return items.map((item) => {
@@ -930,15 +987,413 @@ function normalizeCompanyArtifact(payload: Record<string, unknown>, allowedCandi
       candidateIds,
       noEvidenceSupport: candidateIds.length === 0,
     }
-  }).filter(Boolean) as Array<{
-    legalNameCandidate: string
-    displayName: string
-    rationale: string
-    researchNodeIds: string[]
-    tsCodeHint: string | null
-    candidateIds: string[]
-    noEvidenceSupport: boolean
-  }>
+  }).filter(Boolean) as NormalizedCompanyArtifact[]
+}
+
+function companyCoverageTargets(map: unknown): CompanyCoverageTarget[] {
+  const payload = map && typeof map === 'object' ? map as { nodes?: unknown[] } : {}
+  if (!Array.isArray(payload.nodes)) return []
+  return payload.nodes.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const row = item as Record<string, unknown>
+    if (row.type !== 'company') return []
+    const nodeId = asString(row.id, 128)
+    const nodeName = asString(row.name, 160)
+    const stage = asString(row.stage, 80) || null
+    const status = asString(row.status, 300)
+    const poolText = `${nodeName} ${stage || ''} ${status}`
+    if (!nodeId || !nodeName || !/(A股|候选池|上市公司|资本市场)/i.test(poolText)) return []
+    return [{ nodeId, nodeName, stage }]
+  })
+}
+
+function uniqueArtifactSecurity(
+  db: Database.Database,
+  company: NormalizedCompanyArtifact,
+): MatchedSecurityCandidate | null {
+  const matched = matchSecurities(db, company.displayName, company.tsCodeHint)
+  if (matched.length !== 1 || matched[0].matchStatus !== 'exact') return null
+  return matched[0]
+}
+
+function mergeCompanyArtifacts(
+  db: Database.Database,
+  groups: NormalizedCompanyArtifact[][],
+): NormalizedCompanyArtifact[] {
+  const merged = new Map<string, NormalizedCompanyArtifact>()
+  for (const company of groups.flat()) {
+    const security = uniqueArtifactSecurity(db, company)
+    const key = security?.tsCode.toUpperCase()
+      || company.displayName.trim().toLocaleLowerCase('zh-CN')
+    const current = merged.get(key)
+    if (!current) {
+      merged.set(key, company)
+      continue
+    }
+    const incomingHasEvidence = company.candidateIds.length > 0
+    const currentHasEvidence = current.candidateIds.length > 0
+    merged.set(key, {
+      ...current,
+      legalNameCandidate: current.legalNameCandidate || company.legalNameCandidate,
+      rationale: incomingHasEvidence && !currentHasEvidence ? company.rationale : current.rationale,
+      researchNodeIds: [...new Set([...current.researchNodeIds, ...company.researchNodeIds])],
+      tsCodeHint: current.tsCodeHint || company.tsCodeHint || security?.tsCode || null,
+      candidateIds: [...new Set([...current.candidateIds, ...company.candidateIds])],
+      noEvidenceSupport: !currentHasEvidence && !incomingHasEvidence,
+    })
+  }
+  return [...merged.values()].slice(0, 30)
+}
+
+function retrievalQueryTexts(artifacts: Record<string, unknown>): string[] {
+  const retrieve = artifacts.retrieve && typeof artifacts.retrieve === 'object'
+    ? artifacts.retrieve as { plan?: { queries?: unknown[] } }
+    : {}
+  return Array.isArray(retrieve.plan?.queries)
+    ? retrieve.plan.queries.flatMap((item) => {
+        if (!item || typeof item !== 'object') return []
+        const text = asString((item as Record<string, unknown>).text, 600)
+        return text ? [text] : []
+      })
+    : []
+}
+
+function discoverMentionedLocalSecurities(
+  db: Database.Database,
+  artifacts: Record<string, unknown>,
+  selectedCandidates: Array<Record<string, unknown>>,
+  allowedCandidateIds: Set<string>,
+): NormalizedCompanyArtifact[] {
+  const queryTexts = retrievalQueryTexts(artifacts)
+  const memo = asString(
+    (artifacts.retrieve as { nativeResearchMemo?: unknown } | undefined)?.nativeResearchMemo,
+    30_000,
+  )
+  const evidenceTexts = selectedCandidates.map((item) => [item.title, item.summary, item.excerpt]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' '))
+  const rows = db.prepare(`
+    SELECT ts_code, name, industry
+    FROM stock_basic_cache
+    WHERE list_status = 'L' AND name IS NOT NULL AND LENGTH(TRIM(name)) >= 2
+    ORDER BY LENGTH(name) DESC, ts_code ASC
+  `).all() as Array<{ ts_code: string; name: string; industry: string | null }>
+  return rows.flatMap((row) => {
+    const queryMentioned = queryTexts.some((text) => text.includes(row.name) || text.includes(row.ts_code))
+    const evidenceIndexes = evidenceTexts.flatMap((text, index) => (
+      text.includes(row.name) || text.includes(row.ts_code) ? [index] : []
+    ))
+    const bodyMentions = Number(memo.includes(row.name) || memo.includes(row.ts_code)) + evidenceIndexes.length
+    if (!queryMentioned && bodyMentions < 2) return []
+    const candidateIds = evidenceIndexes
+      .map((index) => asString(selectedCandidates[index]?.id, 128))
+      .filter((id) => Boolean(id) && allowedCandidateIds.has(id))
+    return [{
+      legalNameCandidate: row.name,
+      displayName: row.name,
+      rationale: candidateIds.length
+        ? '检索正文已出现该A股公司，作为产业映射候选保留；实际业务暴露、收入与利润贡献仍需公司公告和主营构成验证。'
+        : '检索计划已主动搜索该A股公司，但本轮代表性正文未形成可引用证据；作为待核验线索保留，不代表业务暴露或受益已经确认。',
+      researchNodeIds: [],
+      tsCodeHint: row.ts_code,
+      candidateIds: [...new Set(candidateIds)],
+      noEvidenceSupport: candidateIds.length === 0,
+    }]
+  }).slice(0, 30)
+}
+
+function localSecurityUniverse(
+  db: Database.Database,
+  companies: NormalizedCompanyArtifact[],
+): LocalSecurityCandidate[] {
+  const seedCodes = [...new Set(companies.flatMap((company) => {
+    const security = uniqueArtifactSecurity(db, company)
+    return security ? [security.tsCode] : []
+  }))]
+  if (!seedCodes.length) return []
+  const placeholders = seedCodes.map(() => '?').join(', ')
+  const seedRows = db.prepare(`
+    SELECT ts_code, name, industry FROM stock_basic_cache
+    WHERE list_status = 'L' AND ts_code IN (${placeholders})
+  `).all(...seedCodes) as Array<{ ts_code: string; name: string | null; industry: string | null }>
+  const industries = [...new Set(seedRows.map((row) => row.industry).filter((value): value is string => Boolean(value)))]
+  const universeRows = industries.length
+    ? db.prepare(`
+        SELECT ts_code, name, industry FROM stock_basic_cache
+        WHERE list_status = 'L' AND name IS NOT NULL
+          AND industry IN (${industries.map(() => '?').join(', ')})
+        ORDER BY ts_code ASC LIMIT 800
+      `).all(...industries) as Array<{ ts_code: string; name: string; industry: string | null }>
+    : seedRows.filter((row): row is { ts_code: string; name: string; industry: string | null } => Boolean(row.name))
+  const priority = new Set(seedCodes)
+  return universeRows
+    .map((row) => ({ tsCode: row.ts_code, name: row.name, industry: row.industry }))
+    .sort((left, right) => Number(priority.has(right.tsCode)) - Number(priority.has(left.tsCode)) || left.tsCode.localeCompare(right.tsCode))
+}
+
+function auditCompanyCoverage(
+  db: Database.Database,
+  map: unknown,
+  companies: NormalizedCompanyArtifact[],
+  requireInvestmentCoverage = false,
+): CompanyCoverageAudit {
+  const targets = companyCoverageTargets(map)
+  if (!targets.length && !requireInvestmentCoverage) {
+    return { status: 'not_applicable', targetMinimum: 0, activeAShareCount: 0, targets: [] }
+  }
+  const exactSecurities = new Map(companies.map((company) => [company, uniqueArtifactSecurity(db, company)]))
+  const activeCodes = new Set([...exactSecurities.values()].flatMap((security) => (
+    security ? [security.tsCode] : []
+  )))
+  const targetRows = targets.map((target) => {
+    const names = companies
+      .filter((company) => exactSecurities.get(company) && company.researchNodeIds.includes(target.nodeId))
+      .map((company) => company.displayName)
+    return {
+      ...target,
+      status: names.length ? 'covered' as const : 'uncovered' as const,
+      companyNames: [...new Set(names)],
+      reason: names.length ? null : '尚无公司候选明确关联该生态位',
+    }
+  })
+  const targetMinimum = requireInvestmentCoverage
+    ? Math.min(12, Math.max(3, targets.length))
+    : targets.length
+  return {
+    status: activeCodes.size >= targetMinimum && targetRows.every((target) => target.status === 'covered')
+      ? 'complete'
+      : 'incomplete',
+    targetMinimum,
+    activeAShareCount: activeCodes.size,
+    targets: targetRows,
+  }
+}
+
+async function repairCompanyCoverage(
+  db: Database.Database,
+  skillContent: string,
+  input: {
+    researchQuestion: string
+    scope: unknown
+    map: unknown
+    nativeResearchMemo: string
+    selectedCandidates: Array<Record<string, unknown>>
+    existingCompanies: NormalizedCompanyArtifact[]
+    allowedCandidateIds: Set<string>
+  },
+): Promise<NormalizedCompanyArtifact[]> {
+  const universe = localSecurityUniverse(db, input.existingCompanies)
+  if (!universe.length) return []
+  const coverage = auditCompanyCoverage(
+    db,
+    input.map,
+    input.existingCompanies,
+    (input.scope as { purpose?: unknown } | undefined)?.purpose === 'investment',
+  )
+  const result = await callStageJson(db, buildSkillPrompt(skillContent, 'companies', JSON.stringify({
+    task: '公司覆盖补全',
+    researchQuestion: input.researchQuestion,
+    scope: input.scope,
+    map: input.map,
+    nativeResearchMemo: input.nativeResearchMemo,
+    candidates: input.selectedCandidates,
+    existingCompanies: input.existingCompanies,
+    coverage,
+    localActiveAShareUniverse: universe,
+    requiredJson: {
+      companies: [{
+        legalName: 'string',
+        displayName: 'string',
+        rationale: 'string',
+        researchNodeIds: ['string'],
+        tsCode: 'string',
+        candidateIds: ['string'],
+      }],
+    },
+    rules: [
+      '只补充localActiveAShareUniverse中存在且仍上市的A股证券，不输出全部证券名单',
+      '从产业链关键生态位产生候选，不从概念股名单倒推产业逻辑',
+      '每个关键生态位至少明确关联1家公司；竞争性生态位在合理时保留多家可比候选',
+      '不得用同一家公司代替整条产业链，也不得因缺少正文证据而静默删除合理候选',
+      '没有candidateIds时必须在rationale中明确“待核验”，不得声称业务暴露或受益已确认',
+      'researchNodeIds只能使用map中已有节点ID',
+    ],
+  })))
+  const allowedUniverse = new Set(universe.map((item) => item.tsCode))
+  return normalizeCompanyArtifact(result.payload, input.allowedCandidateIds).flatMap((company) => {
+    const security = uniqueArtifactSecurity(db, company)
+    if (!security || !allowedUniverse.has(security.tsCode)) return []
+    return [{ ...company, tsCodeHint: security.tsCode }]
+  })
+}
+
+interface CompanyGraphProjection {
+  map: ResearchMapArtifact & { idNamespace: 'project_v1' }
+  companies: NormalizedCompanyArtifact[]
+  roleNodeIdsByTsCode: Record<string, string[]>
+  addedNodes: number
+  addedEdges: number
+}
+
+function normalizedResearchName(value: string): string {
+  return value.trim().replace(/股份有限公司|集团|[\s（）()]/g, '').toLocaleLowerCase('zh-CN')
+}
+
+function projectCompaniesIntoResearchMap(
+  db: Database.Database,
+  projectId: string,
+  map: ResearchMapArtifact,
+  companies: NormalizedCompanyArtifact[],
+): CompanyGraphProjection {
+  const { map: scoped, nodeIdMap } = scopeResearchMapIds(projectId, map)
+  const nodes = scoped.nodes.map((node) => ({ ...node }))
+  const edges = scoped.edges.map((edge) => ({ ...edge }))
+  const nodeById = new Map(nodes.map((node) => [node.id, node]))
+  const edgeKeys = new Set(edges.map((edge) => `${edge.source}:${edge.target}:${edge.relation}`))
+  const roleNodeIdsByTsCode: Record<string, string[]> = {}
+  let addedNodes = 0
+  let addedEdges = 0
+
+  const appendEdge = (
+    source: string,
+    target: string,
+    relation: string,
+    evidenceIds: string[],
+  ) => {
+    const key = `${source}:${target}:${relation}`
+    if (edgeKeys.has(key)) return
+    edgeKeys.add(key)
+    edges.push({
+      id: stableId(projectId, 'edge', key),
+      source,
+      target,
+      relation,
+      statementKind: 'estimate',
+      strength: null,
+      bottleneck: false,
+      exposurePct: null,
+      evidenceIds,
+      lastUpdated: null,
+    })
+    addedEdges += 1
+  }
+
+  const projectedCompanies = companies.map((company) => {
+    const security = uniqueArtifactSecurity(db, company)
+    if (!security) return company
+    const normalizedNames = new Set([
+      normalizedResearchName(company.displayName),
+      normalizedResearchName(company.legalNameCandidate),
+      normalizedResearchName(security.stockName),
+    ].filter(Boolean))
+    const originalNodeIds = [...new Set(company.researchNodeIds
+      .map((id) => nodeIdMap.get(id) ?? id)
+      .filter((id) => nodeById.has(id)))]
+    const candidatePoolNodeIds = originalNodeIds.filter((id) => {
+      const node = nodeById.get(id)
+      return node?.type === 'company' && /候选池/.test(node.name)
+    })
+    const fallbackRoleNodeIds = originalNodeIds.filter((id) => {
+      const node = nodeById.get(id)
+      if (!node || node.type === 'stock') return false
+      if (node.type === 'company' && normalizedNames.has(normalizedResearchName(node.name))) return false
+      return node.type !== 'company'
+    })
+    const roleNodeIds = (candidatePoolNodeIds.length ? candidatePoolNodeIds : fallbackRoleNodeIds).slice(0, 6)
+    roleNodeIdsByTsCode[security.tsCode] = roleNodeIds
+
+    let companyNode = nodes.find((node) => (
+      node.type === 'company' && normalizedNames.has(normalizedResearchName(node.name))
+    ))
+    if (!companyNode) {
+      const primaryRole = roleNodeIds.map((id) => nodeById.get(id)).find(Boolean)
+      companyNode = {
+        id: stableId(projectId, 'node', `company:${security.tsCode}`),
+        type: 'company',
+        name: company.legalNameCandidate || security.stockName,
+        stage: primaryRole?.stage ?? '资本市场',
+        statementKind: 'estimate',
+        status: company.noEvidenceSupport
+          ? '待核验产业候选；证券身份已确认，业务暴露、客户关系和受益程度仍需公告与主营构成验证'
+          : company.rationale,
+        metrics: [],
+        evidenceIds: company.candidateIds,
+        lastUpdated: null,
+      }
+      nodes.push(companyNode)
+      nodeById.set(companyNode.id, companyNode)
+      addedNodes += 1
+    }
+
+    const symbol = security.tsCode.split('.')[0]
+    let stockNode = nodes.find((node) => node.type === 'stock' && (
+      node.name.includes(security.tsCode) || node.name.includes(symbol)
+    ))
+    if (!stockNode) {
+      stockNode = {
+        id: stableId(projectId, 'node', `stock:${security.tsCode}`),
+        type: 'stock',
+        name: `${security.stockName}（${symbol}）`,
+        stage: '资本市场',
+        statementKind: 'estimate',
+        status: '候选证券映射；业务暴露、财务贡献和投资结论以公司页后续核验为准',
+        metrics: [],
+        evidenceIds: company.candidateIds,
+        lastUpdated: null,
+      }
+      nodes.push(stockNode)
+      nodeById.set(stockNode.id, stockNode)
+      addedNodes += 1
+    }
+
+    appendEdge(stockNode.id, companyNode.id, '映射到', company.candidateIds)
+    for (const roleNodeId of roleNodeIds) {
+      const roleNode = nodeById.get(roleNodeId)
+      if (!roleNode || roleNode.id === companyNode.id) continue
+      appendEdge(
+        roleNode.id,
+        companyNode.id,
+        roleNode.type === 'company' && /候选池/.test(roleNode.name) ? '包含候选' : '关联候选',
+        company.candidateIds,
+      )
+    }
+    return {
+      ...company,
+      researchNodeIds: mergeUnique(originalNodeIds, [companyNode.id, stockNode.id]),
+    }
+  })
+
+  return {
+    map: { ...scoped, nodes, edges },
+    companies: projectedCompanies,
+    roleNodeIdsByTsCode,
+    addedNodes,
+    addedEdges,
+  }
+}
+
+function storedCompanyArtifacts(
+  artifacts: Record<string, unknown>,
+  allowedCandidateIds: Set<string>,
+): NormalizedCompanyArtifact[] {
+  const items = (artifacts.companies as { items?: unknown[] } | undefined)?.items
+  if (!Array.isArray(items)) return []
+  return items.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const row = item as Record<string, unknown>
+    const displayName = asString(row.displayName, 120) || asString(row.legalNameCandidate, 200)
+    if (!displayName) return []
+    const candidateIds = sanitizeCandidateIds(row.candidateIds, allowedCandidateIds)
+    return [{
+      legalNameCandidate: asString(row.legalNameCandidate, 200) || displayName,
+      displayName,
+      rationale: asString(row.rationale, 500) || '既有公司候选',
+      researchNodeIds: asStringArray(row.researchNodeIds, 20, 128),
+      tsCodeHint: asString(row.tsCodeHint, 20) || null,
+      candidateIds,
+      noEvidenceSupport: candidateIds.length === 0 || row.noEvidenceSupport === true,
+    }]
+  })
 }
 
 export interface ResearchReportFindingArtifact {
@@ -1242,7 +1697,13 @@ function companyCandidateEvidenceIds(
     item.displayName === candidate.display_name
     || item.legalNameCandidate === candidate.legal_name_candidate
   ))
-  const runCandidateIds = new Set(listEvidenceCandidates(db, { projectId, runId }).map((item) => item.id))
+  const expansion = artifacts.companyExpansion && typeof artifacts.companyExpansion === 'object'
+    ? artifacts.companyExpansion as { chainVersion?: unknown; sourceRunId?: unknown }
+    : null
+  const evidenceRunId = expansion?.chainVersion === 2 && typeof expansion.sourceRunId === 'string'
+    ? expansion.sourceRunId
+    : runId
+  const runCandidateIds = new Set(listEvidenceCandidates(db, { projectId, runId: evidenceRunId }).map((item) => item.id))
   return sanitizeCandidateIds(sourceCompany?.candidateIds, runCandidateIds)
 }
 
@@ -1404,7 +1865,27 @@ function applyGenerationArtifacts(
         updateCandidateNodes.run(JSON.stringify([...new Set(remapped)]), Date.now(), candidate.id, projectId, runId)
       }
     }
-    if (runId) materializeExactProjectCompanies(db, projectId, runId, artifacts)
+    if (runId) {
+      materializeExactProjectCompanies(db, projectId, runId, artifacts)
+      const expansion = artifacts.companyExpansion && typeof artifacts.companyExpansion === 'object'
+        ? artifacts.companyExpansion as { chainVersion?: unknown; roleNodeIdsByTsCode?: unknown }
+        : null
+      const projection = artifacts.companyProjection && typeof artifacts.companyProjection === 'object'
+        ? artifacts.companyProjection as { roleNodeIdsByTsCode?: unknown }
+        : null
+      const researchNodeIdsByTsCode = expansion?.chainVersion === 2
+        && expansion.roleNodeIdsByTsCode
+        && typeof expansion.roleNodeIdsByTsCode === 'object'
+        ? expansion.roleNodeIdsByTsCode as Record<string, string[]>
+        : projection?.roleNodeIdsByTsCode && typeof projection.roleNodeIdsByTsCode === 'object'
+          ? projection.roleNodeIdsByTsCode as Record<string, string[]>
+          : {}
+      reconcileIndustryResearchProjectMainBusinessExposures(
+        db,
+        projectId,
+        researchNodeIdsByTsCode,
+      )
+    }
     const evidence = artifacts.evidence as { pendingSources?: string[]; notes?: string[] } | undefined
     if (evidence?.pendingSources?.length) {
       for (const source of evidence.pendingSources.slice(0, 20)) {
@@ -1449,6 +1930,7 @@ async function runGenerationPipeline(
   skill: SkillMeta,
   emitter?: ProgressEmitter,
   resumeAfterCompanies = false,
+  financialOptions?: GenerationFinancialOptions,
 ): Promise<void> {
   let run = updateGenerationRun(db, runId, {
     status: 'running',
@@ -1469,7 +1951,15 @@ async function runGenerationPipeline(
     dataAsOf: asString(rawScopeFallback.dataAsOf, 20) || generationCurrentDate,
   }
   const artifacts = parseArtifacts(run)
-  let allEvidenceCandidates = listEvidenceCandidates(db, { projectId: run.project_id, runId: run.id })
+  const expansionSourceRunId = artifacts.companyExpansion && typeof artifacts.companyExpansion === 'object'
+    && (artifacts.companyExpansion as { chainVersion?: unknown }).chainVersion === 2
+    && typeof (artifacts.companyExpansion as { sourceRunId?: unknown }).sourceRunId === 'string'
+    ? (artifacts.companyExpansion as { sourceRunId: string }).sourceRunId
+    : run.id
+  let allEvidenceCandidates = listEvidenceCandidates(db, {
+    projectId: run.project_id,
+    runId: expansionSourceRunId,
+  })
   let selectedTopNIds = Array.isArray((artifacts.retrieve as { selectedTopNIds?: string[] } | undefined)?.selectedTopNIds)
     ? (artifacts.retrieve as { selectedTopNIds: string[] }).selectedTopNIds
     : allEvidenceCandidates.slice(0, 14).map((item) => item.id)
@@ -1632,7 +2122,11 @@ async function runGenerationPipeline(
         nodes: [{ id: 'string', type: 'product', name: 'string', stage: 'string', status: 'string', candidateIds: ['string'] }],
         edges: [{ id: 'string', source: 'string', target: 'string', relation: 'string', bottleneck: false, candidateIds: ['string'] }],
       },
-      rules: ['关键节点尽量引用 candidateIds', '无引用节点 status 使用 no_evidence_support'],
+      rules: [
+        '关键节点尽量引用 candidateIds',
+        '无引用节点 status 使用 no_evidence_support',
+        '若 purpose=investment，按实际适用的设备、材料、封测、模组/渠道和终端等关键生态位建立独立的A股候选池节点；证据不足时保留待核验状态，不得因只找到一家有公告的公司而省略其他候选池',
+      ],
     })))
     artifacts.map = normalizeMapArtifact(mapResult.payload, run.project_id, allowedCandidateIds)
     run = updateGenerationRun(db, runId, {
@@ -1743,8 +2237,58 @@ async function runGenerationPipeline(
           candidateIds: ['string'],
         }],
       },
+      rules: [
+        '投资型研究必须覆盖图谱中的每个A股候选池节点，并形成至少3家可精确映射的A股横向候选；合理时同一竞争性生态位保留多家公司',
+        '候选必须来自产业链生态位映射，不得从概念股名单倒推产业逻辑',
+        '没有candidateIds的合理候选仍可保留为待核验线索，但不得声称业务暴露、收入贡献或受益已经确认',
+      ],
     })))
-    const companies = normalizeCompanyArtifact(companyResult.payload, allowedCandidateIds)
+    const initialCompanies = normalizeCompanyArtifact(companyResult.payload, allowedCandidateIds)
+    const discoveredCompanies = discoverMentionedLocalSecurities(
+      db,
+      artifacts,
+      selectedCandidates,
+      allowedCandidateIds,
+    )
+    let companies = mergeCompanyArtifacts(db, [initialCompanies, discoveredCompanies])
+    const investmentCoverageRequired = (artifacts.scope as { purpose?: unknown } | undefined)?.purpose === 'investment'
+    let companyCoverage = auditCompanyCoverage(db, artifacts.map, companies, investmentCoverageRequired)
+    if (
+      investmentCoverageRequired
+      && companyCoverage.status === 'incomplete'
+    ) {
+      run = updateGenerationRun(db, runId, {
+        currentStage: 'companies',
+        progressCurrent: 6,
+        progressMessage: '正在补齐产业链关键生态位的公司候选',
+      })!
+      emitProgress(emitter, run)
+      const repairedCompanies = await repairCompanyCoverage(db, skillContent, {
+        researchQuestion: run.research_question,
+        scope: artifacts.scope,
+        map: artifacts.map,
+        nativeResearchMemo,
+        selectedCandidates,
+        existingCompanies: companies,
+        allowedCandidateIds,
+      })
+      companies = mergeCompanyArtifacts(db, [companies, repairedCompanies])
+      companyCoverage = auditCompanyCoverage(db, artifacts.map, companies, investmentCoverageRequired)
+    }
+    const companyProjection = projectCompaniesIntoResearchMap(
+      db,
+      run.project_id,
+      artifacts.map as ResearchMapArtifact,
+      companies,
+    )
+    companies = companyProjection.companies
+    artifacts.map = companyProjection.map
+    artifacts.companyProjection = {
+      version: 1,
+      projectedNodes: companyProjection.addedNodes,
+      projectedEdges: companyProjection.addedEdges,
+      roleNodeIdsByTsCode: companyProjection.roleNodeIdsByTsCode,
+    }
     for (const company of companies) {
       const matched = matchSecurities(db, company.displayName, company.tsCodeHint)
       upsertCompanyCandidate(db, {
@@ -1763,6 +2307,7 @@ async function runGenerationPipeline(
     }
     artifacts.companies = {
       count: companies.length,
+      coverage: companyCoverage,
       items: companies.map((item) => ({
         displayName: item.displayName,
         legalNameCandidate: item.legalNameCandidate,
@@ -1778,7 +2323,9 @@ async function runGenerationPipeline(
       model: companyResult.model,
       lastSuccessfulStage: 'companies',
       stageArtifactsJson: JSON.stringify(artifacts),
-      progressMessage: `已生成 ${companies.length} 家候选公司`,
+      progressMessage: companyCoverage.status === 'incomplete'
+        ? `已生成 ${companies.length} 家候选公司，仍有 ${companyCoverage.targets.filter((item) => item.status === 'uncovered').length} 个生态位待核验`
+        : `已生成 ${companies.length} 家候选公司`,
     })!
     } else {
       const companyItems = (artifacts.companies as { items?: unknown[] } | undefined)?.items
@@ -1808,10 +2355,33 @@ async function runGenerationPipeline(
       stageArtifactsJson: JSON.stringify(artifacts),
     })!
     emitProgress(emitter, run)
+    const expansionState = artifacts.companyExpansion && typeof artifacts.companyExpansion === 'object'
+      ? artifacts.companyExpansion as { chainVersion?: unknown; roleNodeIdsByTsCode?: unknown }
+      : null
+    const projectionState = artifacts.companyProjection && typeof artifacts.companyProjection === 'object'
+      ? artifacts.companyProjection as { roleNodeIdsByTsCode?: unknown }
+      : null
+    const roleNodeIdsByTsCode = expansionState?.chainVersion === 2
+      && expansionState.roleNodeIdsByTsCode
+      && typeof expansionState.roleNodeIdsByTsCode === 'object'
+      ? expansionState.roleNodeIdsByTsCode as Record<string, string[]>
+      : projectionState?.roleNodeIdsByTsCode && typeof projectionState.roleNodeIdsByTsCode === 'object'
+        ? projectionState.roleNodeIdsByTsCode as Record<string, string[]>
+        : undefined
     const financialCollection = await collectIndustryResearchProjectFinancials(db, run.project_id, {
+      token: financialOptions?.token,
+      fetchers: financialOptions?.fetchers,
+      researchNodeIdsByTsCode: roleNodeIdsByTsCode,
       shouldCancel: () => getGenerationRun(db, runId)?.cancel_requested === 1,
       onProgress: (state) => {
         artifacts.financialCollection = state
+        if (expansionState?.chainVersion === 2) {
+          artifacts.companyExpansion = {
+            ...(artifacts.companyExpansion as Record<string, unknown>),
+            status: 'running',
+            financialCollection: state,
+          }
+        }
         run = updateGenerationRun(db, runId, {
           currentStage: 'companies',
           progressCurrent: 6,
@@ -1822,6 +2392,13 @@ async function runGenerationPipeline(
       },
     })
     artifacts.financialCollection = financialCollection
+    if (expansionState?.chainVersion === 2) {
+      artifacts.companyExpansion = {
+        ...(artifacts.companyExpansion as Record<string, unknown>),
+        status: financialCollection.status === 'succeeded' ? 'reporting' : 'partial',
+        financialCollection,
+      }
+    }
     run = ensureNotCancelled(db, runId)
 
     // report：先拿小 JSON 元数据，再单独生成完整 Markdown，避免“长文塞进 JSON”导致解析失败
@@ -2092,6 +2669,14 @@ async function runGenerationPipeline(
       }
     }
 
+    if (expansionState?.chainVersion === 2) {
+      artifacts.companyExpansion = {
+        ...(artifacts.companyExpansion as Record<string, unknown>),
+        status: financialCollection.status === 'succeeded' ? 'succeeded' : 'partial',
+        completedAt: Date.now(),
+        financialCollection,
+      }
+    }
     try {
       applyGenerationArtifacts(db, run.project_id, artifacts, run.id)
     } catch (persistError) {
@@ -2172,6 +2757,12 @@ export function getGenerationRunView(db: Database.Database, projectId: string, r
     })
   }
   const artifacts = run ? parseArtifacts(run) : {}
+  const expansion = artifacts.companyExpansion && typeof artifacts.companyExpansion === 'object'
+    ? artifacts.companyExpansion as Record<string, unknown>
+    : null
+  const evidenceRunId = expansion?.chainVersion === 2 && typeof expansion.sourceRunId === 'string'
+    ? expansion.sourceRunId
+    : run?.id
   const retrieve = (artifacts.retrieve && typeof artifacts.retrieve === 'object')
     ? artifacts.retrieve as Record<string, unknown>
     : {}
@@ -2185,7 +2776,9 @@ export function getGenerationRunView(db: Database.Database, projectId: string, r
   const authoritativeDataAsOf = resolveGenerationDataAsOf(project?.data_as_of)
   return {
     run,
-    evidenceCandidates: run ? listProjectEvidenceCandidates(db, projectId, run.id) : listProjectEvidenceCandidates(db, projectId),
+    evidenceCandidates: evidenceRunId
+      ? listProjectEvidenceCandidates(db, projectId, evidenceRunId)
+      : listProjectEvidenceCandidates(db, projectId),
     companyCandidates: run ? listCompanyCandidates(db, { projectId, runId: run.id }) : listCompanyCandidates(db, { projectId }),
     retrievalMode: typeof retrieve.mode === 'string' ? retrieve.mode : null,
     retrievalPlan: retrieve.plan ?? null,
@@ -2214,6 +2807,7 @@ export function getGenerationRunView(db: Database.Database, projectId: string, r
     financialCollection: artifacts.financialCollection && typeof artifacts.financialCollection === 'object'
       ? artifacts.financialCollection as ProjectFinancialCollectionState
       : null,
+    companyExpansion: expansion,
   }
 }
 
@@ -2334,6 +2928,212 @@ export async function startIndustryResearchGeneration(
   const run = createGenerationRun(db, runInput)
   launchGenerationPipeline(db, run.id, skill, options?.emitter)
   return { projectId, run }
+}
+
+export interface CompanyCandidateExpansionResult {
+  addedCandidates: number
+  addedProjectCompanies: number
+  totalCandidates: number
+  totalProjectCompanies: number
+  targetCompanies: number
+  projectedNodes: number
+  projectedEdges: number
+  derivedRunId: string
+  coverage: CompanyCoverageAudit
+}
+
+export interface CompanyCandidateExpansionOptions {
+  emitter?: ProgressEmitter
+  financial?: GenerationFinancialOptions
+}
+
+export async function expandIndustryResearchCompanyCandidates(
+  db: Database.Database,
+  projectId: string,
+  runId: string,
+  resolveSkill: () => SkillMeta | null,
+  options: CompanyCandidateExpansionOptions = {},
+): Promise<CompanyCandidateExpansionResult> {
+  const project = getResearchProject(db, projectId)
+  if (!project) throw new IndustryResearchError('NOT_FOUND', '研究项目不存在')
+  if (project.status === 'archived') throw new IndustryResearchError('INVALID_PARAM', '已归档项目不能补全公司映射')
+  const run = getGenerationRun(db, runId)
+  if (!run || run.project_id !== projectId) throw new IndustryResearchError('NOT_FOUND', '生成运行不存在')
+  if (getActiveGenerationRun(db, projectId)) {
+    throw new IndustryResearchError('GENERATION_ALREADY_RUNNING', '该项目已有进行中的生成任务')
+  }
+  if (!['companies', 'report'].includes(run.last_successful_stage || '')) {
+    throw new IndustryResearchError('GENERATION_STAGE_INVALID', '公司映射尚未形成，不能单独补全')
+  }
+  const skill = resolveSkill()
+  if (!skill || skill.skillId !== 'builtin:industry-chain-research') {
+    throw new IndustryResearchError('BUILTIN_RESEARCH_SKILL_NOT_FOUND', '未发现内置产业研究 Skill')
+  }
+  if (skill.contentHash !== run.skill_content_hash) {
+    throw new IndustryResearchError('SKILL_CHANGED', '产业研究规则已变化，请重新发起完整研究')
+  }
+
+  const artifacts = parseArtifacts(run)
+  if (!artifacts.scope || !artifacts.map) {
+    throw new IndustryResearchError('GENERATION_STAGE_INVALID', '缺少可复用的研究边界或产业图谱')
+  }
+  const priorExpansion = artifacts.companyExpansion && typeof artifacts.companyExpansion === 'object'
+    ? artifacts.companyExpansion as { chainVersion?: unknown; sourceRunId?: unknown }
+    : null
+  const evidenceRunId = priorExpansion?.chainVersion === 2 && typeof priorExpansion.sourceRunId === 'string'
+    ? priorExpansion.sourceRunId
+    : runId
+  const evidenceCandidates = listEvidenceCandidates(db, { projectId, runId: evidenceRunId })
+  const selectedTopNIds = Array.isArray((artifacts.retrieve as { selectedTopNIds?: unknown[] } | undefined)?.selectedTopNIds)
+    ? asStringArray((artifacts.retrieve as { selectedTopNIds: unknown[] }).selectedTopNIds, 40, 128)
+    : evidenceCandidates.slice(0, 16).map((item) => item.id)
+  const allowedCandidateIds = new Set(selectedTopNIds)
+  const selectedCandidates = selectedCandidateViews(evidenceCandidates, selectedTopNIds)
+  const nativeResearchMemo = asString(
+    (artifacts.retrieve as { nativeResearchMemo?: unknown } | undefined)?.nativeResearchMemo,
+    30_000,
+  )
+  const existingArtifacts = storedCompanyArtifacts(artifacts, allowedCandidateIds)
+  const discovered = discoverMentionedLocalSecurities(db, artifacts, selectedCandidates, allowedCandidateIds)
+  let companies = mergeCompanyArtifacts(db, [existingArtifacts, discovered])
+  const investmentCoverageRequired = (artifacts.scope as { purpose?: unknown } | undefined)?.purpose === 'investment'
+  let coverage = auditCompanyCoverage(
+    db,
+    artifacts.map,
+    companies,
+    investmentCoverageRequired,
+  )
+  if (investmentCoverageRequired && coverage.status === 'incomplete') {
+    const repaired = await repairCompanyCoverage(db, loadSkillContent(skill.dirPath), {
+      researchQuestion: run.research_question,
+      scope: artifacts.scope,
+      map: artifacts.map,
+      nativeResearchMemo,
+      selectedCandidates,
+      existingCompanies: companies,
+      allowedCandidateIds,
+    })
+    companies = mergeCompanyArtifacts(db, [companies, repaired])
+    coverage = auditCompanyCoverage(db, artifacts.map, companies, investmentCoverageRequired)
+  }
+
+  const existingRows = listCompanyCandidates(db, { projectId, runId })
+  const existingCodes = new Set(existingRows.flatMap((candidate) => parseMatchedSecurities(candidate)
+    .filter((security) => security.matchStatus === 'exact')
+    .map((security) => security.tsCode)))
+  const existingNames = new Set(existingRows.flatMap((candidate) => [
+    candidate.display_name.trim().toLocaleLowerCase('zh-CN'),
+    candidate.legal_name_candidate.trim().toLocaleLowerCase('zh-CN'),
+  ]))
+  const additions = companies.filter((company) => {
+    const security = uniqueArtifactSecurity(db, company)
+    if (security && existingCodes.has(security.tsCode)) return false
+    return !existingNames.has(company.displayName.trim().toLocaleLowerCase('zh-CN'))
+      && !existingNames.has(company.legalNameCandidate.trim().toLocaleLowerCase('zh-CN'))
+  })
+  const projection = projectCompaniesIntoResearchMap(
+    db,
+    projectId,
+    artifacts.map as ResearchMapArtifact,
+    companies,
+  )
+  companies = projection.companies
+  artifacts.map = projection.map
+  const projectCompanyCountBefore = listResearchProjectCompanies(db, projectId).length
+  const now = Date.now()
+  artifacts.companies = {
+    count: companies.length,
+    coverage,
+    items: companies.map((item) => ({
+      displayName: item.displayName,
+      legalNameCandidate: item.legalNameCandidate,
+      rationale: item.rationale,
+      researchNodeIds: item.researchNodeIds,
+      tsCodeHint: item.tsCodeHint,
+      candidateIds: item.candidateIds,
+      noEvidenceSupport: item.noEvidenceSupport,
+    })),
+  }
+  delete artifacts.report
+  delete artifacts.researchFacts
+  delete artifacts.financialCollection
+  const derivedRunId = randomUUID()
+  artifacts.companyExpansion = {
+    chainVersion: 2,
+    status: 'queued',
+    requestedAt: now,
+    sourceRunId: evidenceRunId,
+    parentRunId: run.id,
+    derivedRunId,
+    addedCandidates: additions.length,
+    targetCompanies: companies.length,
+    projectedNodes: projection.addedNodes,
+    projectedEdges: projection.addedEdges,
+    roleNodeIdsByTsCode: projection.roleNodeIdsByTsCode,
+    coverage,
+    source: 'user_explicit',
+  }
+
+  const derivedRun = db.transaction(() => {
+    const created = createGenerationRun(db, {
+      id: derivedRunId,
+      projectId,
+      researchQuestion: run.research_question,
+      skillId: run.skill_id,
+      skillContentHash: run.skill_content_hash,
+      skillRuleVersion: run.skill_rule_version,
+      scopeJson: run.scope_json,
+      enableWebRetrieval: run.enable_web_retrieval === 1,
+    })
+    for (const company of companies) {
+      const matched = matchSecurities(db, company.displayName, company.tsCodeHint)
+      upsertCompanyCandidate(db, {
+        id: stableId(derivedRunId, 'company_candidate', company.displayName),
+        runId: derivedRunId,
+        projectId,
+        legalNameCandidate: company.legalNameCandidate,
+        displayName: company.displayName,
+        researchNodeIds: company.researchNodeIds,
+        rationale: company.noEvidenceSupport
+          ? `${company.rationale}（无证据支撑）`.slice(0, 500)
+          : company.rationale,
+        matchedSecurities: matched,
+        resolutionStatus: matched.length ? 'pending' : 'unmatched',
+      })
+    }
+    const seeded = updateGenerationRun(db, derivedRunId, {
+      status: 'queued',
+      currentStage: 'companies',
+      lastSuccessfulStage: 'companies',
+      progressCurrent: 6,
+      progressMessage: `已建立 ${companies.length} 家公司链路，准备采集业务暴露与财务时间轴`,
+      stageArtifactsJson: JSON.stringify(artifacts),
+    }) || created
+    materializeExactProjectCompanies(db, projectId, derivedRunId, artifacts)
+    return seeded
+  })()
+
+  const totalCandidates = listCompanyCandidates(db, { projectId, runId: derivedRunId }).length
+  const totalProjectCompanies = listResearchProjectCompanies(db, projectId).length
+  launchGenerationPipeline(
+    db,
+    derivedRun.id,
+    skill,
+    options.emitter,
+    true,
+    options.financial,
+  )
+  return {
+    addedCandidates: additions.length,
+    addedProjectCompanies: Math.max(0, totalProjectCompanies - projectCompanyCountBefore),
+    totalCandidates,
+    totalProjectCompanies,
+    targetCompanies: companies.length,
+    projectedNodes: projection.addedNodes,
+    projectedEdges: projection.addedEdges,
+    derivedRunId: derivedRun.id,
+    coverage,
+  }
 }
 
 export function cancelIndustryResearchGeneration(db: Database.Database, projectId: string, runId: string) {
@@ -2550,6 +3350,77 @@ export function ensureGeneratedProjectCompanies(
   const artifacts = parseArtifacts(run)
   const persist = db.transaction(() => materializeExactProjectCompanies(db, projectId, run.id, artifacts))
   return persist()
+}
+
+export interface IndustryResearchCompanyRemapResult {
+  scannedCandidates: number
+  remappedCandidates: number
+  exactMatches: number
+  ambiguousMatches: number
+  materializedProjectCompanies: number
+  stillUnmatched: number
+}
+
+export function remapUnmatchedIndustryResearchCompanyCandidates(
+  db: Database.Database,
+): IndustryResearchCompanyRemapResult {
+  const candidates = listRemappableUnmatchedCompanyCandidates(db)
+  const result: IndustryResearchCompanyRemapResult = {
+    scannedCandidates: candidates.length,
+    remappedCandidates: 0,
+    exactMatches: 0,
+    ambiguousMatches: 0,
+    materializedProjectCompanies: 0,
+    stillUnmatched: 0,
+  }
+  const artifactsByRun = new Map<string, Record<string, unknown>>()
+
+  const remap = db.transaction(() => {
+    for (const candidate of candidates) {
+      let matches = matchSecurities(db, candidate.display_name)
+      if (matches.length === 0 && candidate.legal_name_candidate !== candidate.display_name) {
+        matches = matchSecurities(db, candidate.legal_name_candidate)
+      }
+      if (matches.length === 0) {
+        result.stillUnmatched += 1
+        continue
+      }
+
+      const updated = updateUnmatchedCompanyCandidateMatches(db, candidate.id, matches)
+      if (!updated || updated.resolution_status === 'excluded') continue
+      result.remappedCandidates += 1
+      const exact = uniqueActiveAShareMatch(db, updated)
+      if (!exact) {
+        result.ambiguousMatches += 1
+        continue
+      }
+
+      result.exactMatches += 1
+      const run = getGenerationRun(db, updated.run_id)
+      if (!run) continue
+      let artifacts = artifactsByRun.get(run.id)
+      if (!artifacts) {
+        artifacts = parseArtifacts(run)
+        artifactsByRun.set(run.id, artifacts)
+      }
+      const existingSecurity = getResearchSecurityByTsCode(db, exact.tsCode)
+      const existingProjectCompany = existingSecurity
+        ? getResearchProjectCompany(db, updated.project_id, existingSecurity.company_id)
+        : null
+      materializeProjectCompanyCandidate(
+        db,
+        updated.project_id,
+        updated.run_id,
+        updated,
+        exact,
+        artifacts,
+      )
+      if (!existingProjectCompany) result.materializedProjectCompanies += 1
+    }
+    return result
+  })
+
+  return remap()
 }
 
 export function resolveIndustryResearchCompanyCandidate(

@@ -71,7 +71,7 @@ const FINANCIAL_METRIC_METADATA: Record<string, FinancialMetricMetadata> = {
   'fina_indicator:q_netprofit_yoy': { label: '单季归母净利润同比', valueKind: 'percent' },
   'fina_indicator:q_gsprofit_margin': { label: '单季毛利率', valueKind: 'percent' },
   'fina_audit:audit_result': { label: '审计意见', valueKind: 'text' },
-  'fina_audit:audit_fees': { label: '审计费用', valueKind: 'ten_thousand_yuan' },
+  'fina_audit:audit_fees': { label: '审计费用', valueKind: 'yuan' },
   'fina_audit:audit_agency': { label: '审计机构', valueKind: 'text' },
   'fina_audit:audit_sign': { label: '签字会计师', valueKind: 'text' },
   'forecast:type': { label: '预告类型', valueKind: 'text' },

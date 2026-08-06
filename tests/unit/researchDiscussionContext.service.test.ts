@@ -330,6 +330,7 @@ describe('研究讨论上下文服务', () => {
   })
 
   it('来源删除后保留启动上下文并明确标记不可用', () => {
+    seedResearchSnapshot(db, Date.now())
     const started = startResearchDiscussion(db, {
       requestId: '00000000-0000-4000-8000-000000000055',
       origin: { type: 'industry_research', id: 'project-1' }, projectId: 'project-1', mode: 'new',
@@ -340,6 +341,8 @@ describe('研究讨论上下文服务', () => {
     const listed = listResearchDiscussions(db, { originType: 'industry_research', originId: 'project-1' })
     expect(listed.items[0]).toMatchObject({ sessionId: started.session.id, origin: { available: false } })
     expect(getSession(db, started.session.id)).not.toBeNull()
+    expect(db.prepare('SELECT COUNT(*) AS count FROM industry_research_snapshots WHERE project_id = ?').get('project-1'))
+      .toEqual({ count: 0 })
   })
 })
 

@@ -6,6 +6,7 @@ import {
   createResearchProject,
   deleteResearchProject,
   listResearchEvidence,
+  updateResearchProject,
 } from '../../electron/main/database/industryResearchRepository'
 import { resolveIndustryResearchChangeSets } from '../../electron/main/services/industryResearchMergeService'
 import { getIndustryResearchSnapshot } from '../../electron/main/services/industryResearchSnapshotService'
@@ -60,7 +61,7 @@ describe('产业研究变更包合并服务', () => {
     expect(listResearchSnapshots(db, 'project-1').total).toBe(0)
   })
 
-  it('接受后原子写入事实与不可变版本，并禁止物理删除项目', () => {
+  it('接受后原子写入事实与不可变版本，并仅允许通过项目永久删除事务清理', () => {
     createFactBatch()
     const result = resolveIndustryResearchChangeSets(db, {
       requestId: '00000000-0000-4000-8000-000000000012', batchId: 'batch-fact', changeSetIds: ['set-fact'],
@@ -76,8 +77,11 @@ describe('产业研究变更包合并服务', () => {
       summary: { projectId: 'project-1', acceptedChangeSetCount: 1 },
       snapshot: { acceptedChangeSetIds: ['set-fact'] },
     })
-    expect(() => deleteResearchProject(db, 'project-1')).toThrowError('SNAPSHOT_PROTECTED')
     expect(() => db.prepare('UPDATE industry_research_snapshots SET title = ? WHERE id = ?').run('篡改', result.snapshotId)).toThrow()
     expect(() => db.prepare('DELETE FROM industry_research_snapshots WHERE id = ?').run(result.snapshotId)).toThrow()
+    updateResearchProject(db, 'project-1', { status: 'archived' })
+    expect(deleteResearchProject(db, 'project-1')).toBe(true)
+    expect(() => getIndustryResearchSnapshot(db, 'project-1', result.snapshotId!)).toThrowError('产业研究版本不存在')
+    expect(getChangeSet(db, 'set-fact')).toBeNull()
   })
 })

@@ -35,10 +35,14 @@ vi.mock('../../electron/main/database/industryResearchFinancialRepository', asyn
     saveResearchDisclosureEvidence: mocks.saveDisclosureEvidence,
   }
 })
-vi.mock('../../electron/main/database/industryResearchRepository', () => ({
-  getResearchProject: vi.fn(), listResearchEvidence: vi.fn(), listResearchHypotheses: vi.fn(),
-  listResearchProjects: vi.fn(), updateResearchProject: vi.fn(),
-}))
+vi.mock('../../electron/main/database/industryResearchRepository', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../../electron/main/database/industryResearchRepository')>()
+  return {
+    ...original,
+    getResearchProject: vi.fn(), listResearchEvidence: vi.fn(), listResearchHypotheses: vi.fn(),
+    listResearchProjects: vi.fn(), updateResearchProject: vi.fn(),
+  }
+})
 vi.mock('../../electron/main/services/skillService', () => ({
   discoverSkills: mocks.discoverSkills,
   loadVerifiedSkillBundle: mocks.loadVerifiedSkillBundle,
@@ -137,6 +141,7 @@ describe('产业研究 IPC', () => {
       'industryResearch:saveBusinessExposure',
       'industryResearch:syncCompanyFinancials',
       'industryResearch:continueFinancialCollection',
+      'industryResearch:expandCompanyCandidates',
       'industryResearch:getFinancialTimeline',
       'industryResearch:getFinancialValidation',
       'industryResearch:saveProfitBridge',

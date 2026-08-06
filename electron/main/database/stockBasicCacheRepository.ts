@@ -1,7 +1,7 @@
 /**
  * FR-151a: stock_basic_cache 仓库
  *
- * 存储全市场股票基础信息（来自 Tushare stock_basic 接口），每周一全量替换。
+ * 存储全市场股票基础信息（来自 Tushare stock_basic 接口），由18:00协调器与启动补偿全量替换。
  * 用于个性选股（personalScreener）的预筛门槛：ST / 退市 / 科创板 / 行业过滤。
  */
 
@@ -16,6 +16,11 @@ interface DbRow {
   list_status: string | null
   circ_float: number | null
   updated_at: number
+}
+
+export interface StockBasicCacheFreshness {
+  count: number
+  maxUpdatedAt: number | null
 }
 
 function fromDbRow(r: DbRow): StockBasicCacheRow {
@@ -110,6 +115,30 @@ export function searchStockBasicByKeyword(
 export function countAll(db: Database.Database): number {
   const row = db.prepare('SELECT COUNT(*) AS cnt FROM stock_basic_cache').get() as { cnt: number }
   return row?.cnt ?? 0
+}
+
+export function getStockBasicCacheFreshness(db: Database.Database): StockBasicCacheFreshness {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count, MAX(updated_at) AS max_updated_at
+    FROM stock_basic_cache
+  `).get() as { count: number; max_updated_at: number | null }
+  return {
+    count: row.count,
+    maxUpdatedAt: row.max_updated_at,
+  }
+}
+
+export function isStockBasicCacheStale(
+  db: Database.Database,
+  expectedBeijingYmd: string,
+): boolean {
+  const freshness = getStockBasicCacheFreshness(db)
+  if (freshness.count === 0 || freshness.maxUpdatedAt == null) return true
+  const updatedBeijingYmd = new Date(freshness.maxUpdatedAt + 8 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10)
+    .replaceAll('-', '')
+  return updatedBeijingYmd < expectedBeijingYmd
 }
 
 /**
