@@ -101,6 +101,10 @@ jobs:
         run: |
           $package = Get-Content -Raw package.json | ConvertFrom-Json
           $installer = "release/RT-ResearchFlow-Setup-$($package.version)-x64.exe"
+          $notes = "docs/releases/v$($package.version).md"
+          if (-not (Test-Path -LiteralPath $notes)) {
+            throw "Release notes '$notes' do not exist."
+          }
           gh release create $env:RELEASE_TAG `
             $installer `
             'release/SHA256SUMS.txt' `
@@ -108,4 +112,4 @@ jobs:
             --prerelease `
             --verify-tag `
             --title "RT-ResearchFlow $env:RELEASE_TAG" `
-            --notes-file 'docs/releases/v0.1.0-beta.1.md'
+            --notes-file $notes

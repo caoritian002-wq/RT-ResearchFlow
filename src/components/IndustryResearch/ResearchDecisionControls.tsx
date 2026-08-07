@@ -12,6 +12,7 @@ interface ResearchComboboxProps {
   placeholder: string
   searchPlaceholder: string
   testId: string
+  ariaLabel?: string
   disabled?: boolean
   onChange: (value: string) => void
 }
@@ -111,6 +112,7 @@ export function ResearchCombobox({
   placeholder,
   searchPlaceholder,
   testId,
+  ariaLabel,
   disabled = false,
   onChange,
 }: ResearchComboboxProps): React.ReactElement {
@@ -178,6 +180,8 @@ export function ResearchCombobox({
       <button
         type="button"
         role="combobox"
+        aria-label={ariaLabel ?? placeholder}
+        aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={listboxId}
         disabled={disabled}
@@ -213,7 +217,7 @@ export function ResearchCombobox({
               className="h-10 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm outline-none placeholder:text-slate-400 dark:bg-transparent"
             />
           </div>
-          <div id={listboxId} role="listbox" className="max-h-64 overflow-y-auto p-1.5">
+          <div id={listboxId} role="listbox" aria-label={`${ariaLabel ?? placeholder}选项`} className="max-h-64 overflow-y-auto p-1.5">
             {filtered.map((option, index) => (
               <button
                 id={`${listboxId}-${index}`}
