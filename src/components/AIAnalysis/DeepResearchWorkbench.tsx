@@ -8,6 +8,7 @@ import type {
 } from '../../../electron/main/services/researchAgentRunManager'
 import type { ResearchAgentRunnerProgress } from '../../../electron/main/services/researchAgentRunner'
 import { useAppStore } from '../../store/appStore'
+import { ResearchCombobox } from '../IndustryResearch/ResearchDecisionControls'
 import type { ResearchApiResponse } from '../ResearchDiscussion/researchDiscussionTypes'
 import { AppConfirmDialog } from '../shared/AppConfirmDialog'
 import {
@@ -592,6 +593,10 @@ function DirectResearchDialog({ open, onClose, onOpenAiConfig, onStarted }: {
   }, [open])
 
   const selectedProject = projects.find((project) => project.id === projectId) ?? null
+  const projectOptions = useMemo(() => projects.map((project) => ({
+    value: project.id,
+    label: project.title,
+  })), [projects])
   const subjects = useMemo<ResearchAgentSubjectView[]>(() => (
     mode === 'industry_project'
       ? selectedProject ? [{ kind: 'industry_project', id: selectedProject.id, label: selectedProject.title }] : []
@@ -669,13 +674,22 @@ function DirectResearchDialog({ open, onClose, onOpenAiConfig, onStarted }: {
                 <span className="mt-1 block text-xs text-slate-500">已确认 {subjects.length}/5</span>
               </label>
             ) : (
-              <label className="block text-sm font-medium">产业研究项目
-                <select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={projectLoadError != null} className="mt-1.5 h-11 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900">
-                  <option value="">{projectLoadError ? '项目读取失败' : projects.length > 0 ? '请选择项目' : '暂无产业研究项目'}</option>
-                  {projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}
-                </select>
+              <div className="block text-sm font-medium">
+                <div>产业研究项目</div>
+                <div className="mt-1.5">
+                  <ResearchCombobox
+                    value={projectId}
+                    options={projectOptions}
+                    placeholder={projectLoadError ? '项目读取失败' : projects.length > 0 ? '请选择项目' : '暂无产业研究项目'}
+                    searchPlaceholder="搜索产业研究项目"
+                    testId="direct-research-project"
+                    ariaLabel="产业研究项目"
+                    disabled={projectLoadError != null}
+                    onChange={setProjectId}
+                  />
+                </div>
                 {projectLoadError && <span role="alert" className="mt-1 block text-xs text-red-600 dark:text-red-300">{projectLoadError}</span>}
-              </label>
+              </div>
             )}
 
             <label className="flex min-h-11 cursor-pointer items-center gap-3 border-y border-slate-200 py-2 text-sm dark:border-slate-800">
