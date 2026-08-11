@@ -4,8 +4,8 @@
  * 数据源（FR-122 升级为 GB/T 4754 国民经济行业分类）：
  *   L2 行业列表：vip.stock.finance.sina.com.cn/q/view/newFLJK.php?param=industry
  *     → 84 个 GB/T 中类（ZA01..ZS90），自带 totalMarketCap/weightedChange
- *   M2 行业成分股：vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData
- *     → node=hangye_Zxx，含 mktcap（万元，真实总市值）
+ *   L2 行业成分股：vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData
+ *     → 仅在用户悬停/下钻 hangye_Zxx 时按需读取，含 mktcap（万元，真实总市值）
  *
  * 适用场景：DPI 受限网络（公司/ISP 屏蔽东财 clist/get 路径）。
  * 网络层使用 Node 原生 `https` 模块（独立 OpenSSL 网络栈）。
@@ -15,7 +15,7 @@
  *   - L1 的 weightedChange = ∑(L2 change × L2 mcap) / ∑ L2 mcap
  *   - L1 的 totalMarketCap = ∑ L2 mcap
  *   - subIndustries 填该 L1 下所有 GB/T L2（与东财 L2 嵌套一致）
- *   - 个股 marketCap 来自 mktcap 字段（万元转元，真实市值）
+ *   - 主快照不预取个股；L2 按需结果的 marketCap 来自 mktcap 字段（万元转元，真实市值）
  */
 
 import * as https from 'https'
@@ -144,10 +144,12 @@ const SINA_INDUSTRY_NODE_URL =
 
 const PER_REQUEST_TIMEOUT_MS = 15000
 const TOTAL_TIMEOUT_MS = 60000
-const CONCURRENCY = 6
-const BATCH_DELAY_MS = 100
 const RETRY_MAX = 2
 const RETRY_BASE_DELAY_MS = 400
+const RATE_LIMIT_COOLDOWN_MS = 5 * 60_000
+const RATE_LIMIT_STATUS_CODES = new Set([403, 429, 456])
+
+let rateLimitedUntil = 0
 
 const HEADERS: Record<string, string> = {
   'User-Agent':
@@ -176,6 +178,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+class SinaHttpError extends Error {
+  constructor(readonly statusCode: number) {
+    super(`HTTP ${statusCode}`)
+    this.name = 'SinaHttpError'
+  }
+}
+
+function throwIfCoolingDown(): void {
+  if (Date.now() < rateLimitedUntil) {
+    throw new Error('SINA_RATE_LIMIT_COOLDOWN')
+  }
+}
+
 function httpsGetRaw(url: string, parentSignal: AbortSignal): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const u = new URL(url)
@@ -196,9 +211,10 @@ function httpsGetRaw(url: string, parentSignal: AbortSignal): Promise<Buffer> {
         res.on('end', () => {
           const buf = Buffer.concat(chunks)
           const elapsed = Date.now() - startedAt
-          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-            console.warn(`[sinaProvider][https] HTTP ${res.statusCode} (${elapsed}ms) ${url}`)
-            reject(new Error(`HTTP ${res.statusCode}`))
+          const statusCode = res.statusCode ?? 0
+          if (statusCode < 200 || statusCode >= 300) {
+            console.warn(`[sinaProvider][https] HTTP ${statusCode} (${elapsed}ms) ${url}`)
+            reject(new SinaHttpError(statusCode))
             return
           }
           resolve(buf)
@@ -220,6 +236,7 @@ function httpsGetRaw(url: string, parentSignal: AbortSignal): Promise<Buffer> {
 }
 
 async function httpsGetWithRetry(url: string, parentSignal: AbortSignal): Promise<Buffer> {
+  throwIfCoolingDown()
   let lastErr: unknown
   for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
     if (parentSignal.aborted) throw new Error('aborted')
@@ -227,6 +244,10 @@ async function httpsGetWithRetry(url: string, parentSignal: AbortSignal): Promis
       return await httpsGetRaw(url, parentSignal)
     } catch (err) {
       lastErr = err
+      if (err instanceof SinaHttpError && RATE_LIMIT_STATUS_CODES.has(err.statusCode)) {
+        rateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS
+        throw new Error(`SINA_RATE_LIMITED_${err.statusCode}`)
+      }
       if (attempt < RETRY_MAX) {
         const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt) + Math.floor(Math.random() * 100)
         await sleep(delay)
@@ -340,38 +361,11 @@ export async function fetchSinaSnapshot(): Promise<MarketSnapshot> {
     console.log(`[sinaProvider] L1 returned ${industries.length} industries in ${Date.now() - t0}ms`)
     if (industries.length === 0) throw new EmptyDataError('Sina industry list empty')
 
-    const t1 = Date.now()
-    const stocksMap = new Map<string, HeatmapStock[]>()
-    for (let i = 0; i < industries.length; i += CONCURRENCY) {
-      if (controller.signal.aborted) throw new Error('aborted')
-      const batch = industries.slice(i, i + CONCURRENCY)
-      const results = await Promise.allSettled(
-        batch.map(async (ind) => {
-          const url = SINA_INDUSTRY_NODE_URL + encodeURIComponent(ind.code)
-          const buf = await httpsGetWithRetry(url, controller.signal)
-          const text = decodeBody(buf)
-          const stocks = parseIndustryStocks(text)
-          return { code: ind.code, stocks }
-        })
-      )
-      for (let k = 0; k < results.length; k++) {
-        const r = results[k]
-        if (r.status === 'fulfilled') {
-          stocksMap.set(r.value.code, r.value.stocks)
-        } else {
-          console.warn(`[sinaProvider] industry ${batch[k].code} (${batch[k].name}) failed: ${(r.reason as Error)?.message ?? r.reason}`)
-        }
-      }
-      if (i + CONCURRENCY < industries.length) await sleep(BATCH_DELAY_MS)
-    }
-    console.log(`[sinaProvider] M2 fetched ${stocksMap.size}/${industries.length} industries in ${Date.now() - t1}ms`)
-
     // FR-122: 84 个 GB/T 国民经济行业中类 → 31 个申万 L1 聚合（与东财统一）
     interface Bucket {
       name: string
       weightedSum: number // ∑ (gbtL2.weightedChange × gbtL2.totalMarketCap)
       mcapSum: number    // ∑ gbtL2.totalMarketCap
-      stocks: HeatmapStock[]
       subIndustries: HeatmapStock[] // 该 L1 下的所有 GB/T L2 子行业
     }
     const buckets = new Map<string, Bucket>()
@@ -381,13 +375,11 @@ export async function fetchSinaSnapshot(): Promise<MarketSnapshot> {
       if (!SINA_GBT_TO_SHENWAN_L1[ind.code]) unmappedCount++
       let bucket = buckets.get(l1)
       if (!bucket) {
-        bucket = { name: l1, weightedSum: 0, mcapSum: 0, stocks: [], subIndustries: [] }
+        bucket = { name: l1, weightedSum: 0, mcapSum: 0, subIndustries: [] }
         buckets.set(l1, bucket)
       }
       bucket.weightedSum += ind.weightedChange * ind.totalMarketCap
       bucket.mcapSum += ind.totalMarketCap
-      const stocks = stocksMap.get(ind.code) ?? []
-      bucket.stocks.push(...stocks)
       // L2 子行业：把 GB/T 中类作为 HeatmapStock 形态推入 subIndustries
       bucket.subIndustries.push({
         code: ind.code, // hangye_Zxx，供 hover 懒加载使用
@@ -403,20 +395,19 @@ export async function fetchSinaSnapshot(): Promise<MarketSnapshot> {
 
     const out: HeatmapIndustry[] = []
     for (const bucket of buckets.values()) {
-      bucket.stocks.sort((a, b) => b.marketCap - a.marketCap)
       bucket.subIndustries.sort((a, b) => b.marketCap - a.marketCap)
       out.push({
         name: bucket.name,
         totalMarketCap: bucket.mcapSum,
         weightedChange: bucket.mcapSum > 0 ? bucket.weightedSum / bucket.mcapSum : 0,
-        stocks: bucket.stocks,
+        stocks: [],
         subIndustries: bucket.subIndustries
       })
     }
     out.sort((a, b) => b.totalMarketCap - a.totalMarketCap)
     if (out.length === 0) throw new EmptyDataError('No industries assembled')
     const subTotal = out.reduce((sum, i) => sum + (i.subIndustries?.length ?? 0), 0)
-    console.log(`[sinaProvider] aggregated to ${out.length} Shenwan L1 + ${subTotal} GB/T L2 (from ${industries.length} GB/T raw)`)
+    console.log(`[sinaProvider] aggregated to ${out.length} Shenwan L1 + ${subTotal} GB/T L2 from one list request`)
     return { updatedAt: new Date().toISOString(), industries: out }
   } finally {
     clearTimeout(timer)

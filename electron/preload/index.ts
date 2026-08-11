@@ -2045,7 +2045,44 @@ const api = {
               }>
             }
           }
-        | { ok: false; code: 'UPSTREAM_TIMEOUT' | 'UPSTREAM_ERROR' | 'EMPTY_DATA'; message: string }
+        | { ok: false; code: 'UPSTREAM_TIMEOUT' | 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_ERROR' | 'EMPTY_DATA'; message: string }
+      >,
+    recoverMomentum: (payload: {
+      windowMinutes: number
+      includeL2: boolean
+      forceRefresh?: boolean
+      existingRecord?: {
+        tradeDate: string
+        boundary: 'lunch-close' | 'market-close'
+        windowMinutes: number
+      }
+    }) =>
+      ipcRenderer.invoke('marketHeatmap:recoverMomentum', payload) as Promise<
+        | {
+            ok: true
+            data: null | {
+              origin: 'historical-recovery'
+              sourceProvider: 'eastmoney'
+              taxonomy: 'shenwan'
+              tradeDate: string
+              boundary: 'lunch-close' | 'market-close'
+              boundaryTime: string
+              baselineTime: string
+              capturedAt: number
+              windowMinutes: number
+              momentum: Record<string, number>
+              coverage: {
+                l1: { available: number; total: number }
+                l2: { available: number; total: number }
+              }
+              warnings: string[]
+            }
+          }
+        | {
+            ok: false
+            code: 'INVALID_PARAM' | 'UPSTREAM_TIMEOUT' | 'UPSTREAM_RATE_LIMITED' | 'HISTORICAL_DATA_UNAVAILABLE' | 'UPSTREAM_ERROR'
+            message: string
+          }
       >,
     // FR-114: Hover 懒加载行业成分股
     getIndustryConstituents: (industryCode: string, industryName: string) =>

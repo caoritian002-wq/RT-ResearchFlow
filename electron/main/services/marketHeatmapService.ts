@@ -38,15 +38,15 @@ export interface HeatmapStock {
 
 export interface HeatmapIndustry {
   name: string
-  /** FR-114: 板块代码（仅东财数据源会填充，如 BK1621；新浪模式为空字符串） */
+  /** 板块代码。东财为 BKxxxx；新浪 L2 为 hangye_Zxx，新浪聚合 L1 不填。 */
   code?: string
   totalMarketCap: number // 行业总市值或成交额之和
   weightedChange: number // 加权涨跌幅
   stocks: HeatmapStock[]
   /**
    * FR-119: 申万二级子行业列表（按 change 降序）
-   * - 仅东财 provider 填充，新浪 provider 始终为 undefined
-   * - 元素 code 为 L2 BK 代码，name 为 L2 中文名（含罗马 Ⅱ 后缀），marketCap 为 L2 总市值
+   * - 东财填充申万 L2，新浪填充 GB/T 中类，Tushare 可能为空
+   * - 元素 code 为数据源 L2 代码，name 为 L2 中文名，marketCap 为 L2 总市值
    * - 前端 graphic 浮层据此渲染 L1 框内嵌的至多 4 块 L2（2 涨 + 2 跌）
    */
   subIndustries?: HeatmapStock[]
@@ -64,9 +64,6 @@ export class EmptyDataError extends Error {
   }
 }
 
-/** FR-114: 模块级缓存最近一次成功的快照，供新浪模式下 hover 兜底使用 */
-let lastSnapshot: MarketSnapshot | null = null
-
 export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
   const provider = getMarketHeatmapProvider()
   let snap: MarketSnapshot
@@ -78,7 +75,6 @@ export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
   } else {
     snap = await fetchSinaSnapshot()
   }
-  lastSnapshot = snap
   return snap
 }
 
@@ -97,9 +93,9 @@ function getTushareTokenOrThrow(): string {
  * FR-114: 按需获取单个行业内的全部成分股（按涨跌幅降序）
  *
  * - 东财：调用 push2delay.eastmoney.com `fs=b:{industryCode}` 拉单板块成分股
- * - 新浪：从 lastSnapshot 内置 stocks[] 读取（新浪主拉已含全量个股，无需新请求）
+ * - 新浪：仅允许 hangye_Zxx L2 代码调用按需成分接口；聚合 L1 不拼接多个 L2 请求
  *
- * 永远不抛错；上游失败时返回空数组，由前端 hover 卡片 fallback 到 snapshot 占位数据。
+ * 永远不抛错；上游失败时返回空数组，由前端保留行业级事实并允许稍后重试。
  */
 export async function fetchIndustryConstituents(
   industryCode: string,
@@ -119,14 +115,9 @@ export async function fetchIndustryConstituents(
       return []
     }
   }
-  // 新浪模式：
-  //   - 若 industryCode 以 'hangye_' 开头（FR-122 GB/T L2 代码）→ 调 sina getHQNodeData 懒加载 L2 成分股
-  //   - 否则（L1 hover/点击）→ 从 lastSnapshot 缓存按 L1 名查找
+  // 新浪模式只读取单个 GB/T L2。L1 由多个 L2 聚合，不能在一次 hover 中扩散为多路请求。
   if (industryCode && industryCode.startsWith('hangye_')) {
     return fetchSinaIndustryConstituents(industryCode)
   }
-  if (!lastSnapshot) return []
-  const ind = lastSnapshot.industries.find(i => i.name === industryName)
-  if (!ind) return []
-  return [...ind.stocks].sort((a, b) => b.change - a.change)
+  return []
 }
