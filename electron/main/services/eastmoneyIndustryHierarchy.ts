@@ -90,7 +90,7 @@ export const SHENWAN_L1_NAME_TO_CODE: ReadonlyMap<string, string> = new Map(
  * 设计说明：
  *   - key 为东方财富 f14 字段返回的二级板块中文名（含罗马 Ⅱ 后缀）
  *   - value 为对应的申万一级行业**中文名**（不是 BK 代码，避免 BK 代码偶发变更）
- *   - 共 132 个二级行业，覆盖申万 31 个一级
+ *   - 共 128 个二级行业，覆盖申万 31 个一级
  *
  * 用途：
  *   provider 解析东财全量板块时，对非 L1 板块按 f14 名字查表归属到对应 L1

@@ -2045,7 +2045,44 @@ const api = {
               }>
             }
           }
-        | { ok: false; code: 'UPSTREAM_TIMEOUT' | 'UPSTREAM_ERROR' | 'EMPTY_DATA'; message: string }
+        | { ok: false; code: 'UPSTREAM_TIMEOUT' | 'UPSTREAM_RATE_LIMITED' | 'UPSTREAM_ERROR' | 'EMPTY_DATA'; message: string }
+      >,
+    recoverMomentum: (payload: {
+      windowMinutes: number
+      includeL2: boolean
+      forceRefresh?: boolean
+      existingRecord?: {
+        tradeDate: string
+        boundary: 'lunch-close' | 'market-close'
+        windowMinutes: number
+      }
+    }) =>
+      ipcRenderer.invoke('marketHeatmap:recoverMomentum', payload) as Promise<
+        | {
+            ok: true
+            data: null | {
+              origin: 'historical-recovery'
+              sourceProvider: 'eastmoney'
+              taxonomy: 'shenwan'
+              tradeDate: string
+              boundary: 'lunch-close' | 'market-close'
+              boundaryTime: string
+              baselineTime: string
+              capturedAt: number
+              windowMinutes: number
+              momentum: Record<string, number>
+              coverage: {
+                l1: { available: number; total: number }
+                l2: { available: number; total: number }
+              }
+              warnings: string[]
+            }
+          }
+        | {
+            ok: false
+            code: 'INVALID_PARAM' | 'UPSTREAM_TIMEOUT' | 'UPSTREAM_RATE_LIMITED' | 'HISTORICAL_DATA_UNAVAILABLE' | 'UPSTREAM_ERROR'
+            message: string
+          }
       >,
     // FR-114: Hover 懒加载行业成分股
     getIndustryConstituents: (industryCode: string, industryName: string) =>
@@ -2925,8 +2962,8 @@ const api = {
 
   // ── Market Overview ────────────────────────────────────
   market: {
-    getMarketOverview: (forceRefresh?: boolean) =>
-      ipcRenderer.invoke('market:getMarketOverview', { forceRefresh }) as Promise<
+    getMarketOverview: (request?: { tradeDate?: string | null; forceRefresh?: boolean }) =>
+      ipcRenderer.invoke('market:getMarketOverview', request) as Promise<
         | {
             ok: true
             snapshot: {
@@ -2943,12 +2980,30 @@ const api = {
               generatedAt: number
               isHistorical?: boolean
               tradeDate?: string
+              coverage: {
+                distribution: { available: boolean; sampleCount: number }
+                timeline: { mode: 'exact' | 'approximate' | 'missing'; pointCount: number }
+              }
+              navigation: {
+                selectedTradeDate: string
+                previousTradeDate: string | null
+                nextTradeDate: string | null
+                latestTradeDate: string
+              }
               resonance: {
                 tradeDate: string
+                recoverableTradeDates: string[]
                 dataMode: 'realtime' | 'archive' | 'partial'
+                sourceMode: 'realtime' | 'local_archive' | 'network_backfill'
                 sourceLabel: string
                 generatedAt: number
-                coverage: { available: number; total: number }
+                coverage: {
+                  available: number
+                  total: number
+                  benchmarkTrends: { available: number; total: number }
+                  sectorTrends: { available: number; total: number }
+                  boardFacts: { available: number; total: number }
+                }
                 benchmarks: Array<{
                   key: 'shanghai' | 'csi300' | 'chinext'
                   code: string
@@ -2970,6 +3025,14 @@ const api = {
                   flatCount: number | null
                   mainNetInflow: number | null
                   mainNetInflowRate: number | null
+                  structure: {
+                    state: 'broad_strength' | 'concentrated_lead' | 'divergent' | 'broad_weakness' | 'insufficient'
+                    available: number
+                    total: number
+                    leaders: string[]
+                    laggards: string[]
+                    summary: string
+                  }
                   metrics: Record<'shanghai' | 'csi300' | 'chinext', {
                     sampleCount: number
                     correlation: number | null
@@ -2984,10 +3047,60 @@ const api = {
                   }>
                 }>
               }
+              quality: {
+                status: 'complete' | 'partial'
+                missingParts: Array<
+                  | 'benchmark_trends'
+                  | 'sector_trends'
+                  | 'board_facts'
+                  | 'distribution'
+                  | 'timeline'
+                  | 'timeline_approximate'
+                >
+              }
             }
           }
         | { ok: false; code: string; error: string }
       >,
+    getMarketResonanceChildren: (request: {
+      tradeDate: string
+      parentIndustryCode: string
+      forceRefresh?: boolean
+    }) => ipcRenderer.invoke('market:getMarketResonanceChildren', request) as Promise<
+      | {
+          ok: true
+          result: {
+            tradeDate: string
+            parentIndustryCode: string
+            parentIndustryName: string
+            factSource: 'local_archive' | 'current_network'
+            structure: {
+              state: 'broad_strength' | 'concentrated_lead' | 'divergent' | 'broad_weakness' | 'insufficient'
+              available: number
+              total: number
+              leaders: string[]
+              laggards: string[]
+              summary: string
+            }
+            trendCoverage: { available: number; total: number }
+            children: Array<{
+              boardCode: string
+              name: string
+              tradeDate: string
+              change: number
+              excessVsParent: number | null
+              breadthRate: number | null
+              upCount: number | null
+              downCount: number | null
+              flatCount: number | null
+              mainNetInflow: number | null
+              mainNetInflowRate: number | null
+              points: Array<{ time: string; change: number }>
+            }>
+          }
+        }
+      | { ok: false; code: string; error: string }
+    >,
     getConceptConstituents: (conCode: string) =>
       ipcRenderer.invoke('market:getConceptConstituents', { conCode }) as Promise<
         | {

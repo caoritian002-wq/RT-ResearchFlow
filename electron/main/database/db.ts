@@ -4557,6 +4557,24 @@ const MIGRATIONS: DatabaseMigration[] = [
         )
         BEGIN SELECT RAISE(ABORT, 'INDUSTRY_RESEARCH_FACT_IMMUTABLE'); END;
     `
+  },
+  {
+    // FR-261: local-first daily archives for historical market resonance playback.
+    version: 136,
+    sql: `
+      CREATE TABLE market_resonance_daily_snapshots (
+        trade_date          TEXT PRIMARY KEY CHECK (length(trade_date) = 8),
+        data_mode           TEXT NOT NULL CHECK (data_mode IN ('archive', 'partial')),
+        source_label        TEXT NOT NULL,
+        coverage_available INTEGER NOT NULL CHECK (coverage_available >= 0),
+        coverage_total     INTEGER NOT NULL CHECK (coverage_total > 0),
+        snapshot_json      TEXT NOT NULL,
+        snapshot_sha256    TEXT NOT NULL CHECK (length(snapshot_sha256) = 64),
+        captured_at        INTEGER NOT NULL CHECK (captured_at > 0)
+      );
+      CREATE INDEX idx_market_resonance_snapshots_captured
+        ON market_resonance_daily_snapshots(captured_at DESC);
+    `
   }
 ]
 

@@ -8,6 +8,7 @@ export type AfterCloseSyncTaskKey =
   | 'market_daily'
   | 'chip_structure'
   | 'sector_snapshot'
+  | 'market_resonance'
   | 'trend_scores'
   | 'premarket_validation'
 export type AfterCloseSyncTaskStatus = 'running' | 'completed' | 'partial' | 'failed' | 'blocked'

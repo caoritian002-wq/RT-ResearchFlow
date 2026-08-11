@@ -1,5 +1,16 @@
 import { create } from 'zustand'
 import type { Briefing, BriefingListOptions, BriefingSourceStat, DailyArchiveRow, Source, AppSettingsRow, DecisionCenterFiltersPreference, ImpactRating, PublicationTimeScope, ScanStatus } from '../../electron/main/database/types'
+import { buildHeatmapFailureMessage } from '../utils/heatmapFailure'
+import {
+  computeIndustryMomentum,
+  createPersistedIndustryMomentum,
+  getBeijingDate,
+  hasMeaningfulIndustryMomentum,
+  parsePersistedIndustryMomentum,
+  type HeatmapHistoryEntry,
+  type IndustryMomentumMeta,
+} from '../utils/heatmapMomentum'
+import { isInTradingHours } from '../utils/tradingHours'
 
 interface MarketSnapshot {
   updatedAt: string
@@ -13,26 +24,17 @@ interface MarketSnapshot {
   }>
 }
 
-interface HeatmapHistoryEntry {
-  snapshot: MarketSnapshot
-  fetchedAt: number
-}
-
-const HEATMAP_HISTORY_MAX = 20
-// FR-102: 动量窗口由 settings.momentumWindowMinutes 动态决定，此处不再需要常量
+// 30分钟配置需要至少31个一分钟样本，额外余量用于轮询抖动。
+const HEATMAP_HISTORY_MAX = 40
+const HEATMAP_LIVE_FRESHNESS_MS = 90_000
+let heatmapMomentumRecoveryPendingCount = 0
 
 /** FR-115: 行业云图数据源类型 */
 export type HeatmapProvider = 'sina' | 'eastmoney' | 'tushare'
 
 /** FR-115: 返回今日北京时间的日期部分，YYYY-MM-DD */
 function getTodayBjDate(): string {
-  const now = new Date()
-  const bjOffset = 8 * 60
-  const bjTime = new Date(now.getTime() + (bjOffset + now.getTimezoneOffset()) * 60_000)
-  const y = bjTime.getFullYear()
-  const m = String(bjTime.getMonth() + 1).padStart(2, '0')
-  const d = String(bjTime.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
+  return getBeijingDate(Date.now())
 }
 
 /** FR-104: 今日北京时间日期作为 localStorage key 的一部分（FR-115 升级为按 provider 分槽，见 getProviderCacheKey） */
@@ -40,6 +42,100 @@ function getTodayBjDate(): string {
 /** FR-115: 为指定 provider 返回今日 localStorage key，格式 'heatmapCache_{provider}_{YYYY-MM-DD}' */
 function getProviderCacheKey(provider: HeatmapProvider, date: string): string {
   return `heatmapCache_${provider}_${date}`
+}
+
+function getMomentumCacheKey(provider: HeatmapProvider): string {
+  return `heatmapMomentumLatest_${provider}`
+}
+
+function readPersistedMomentum(
+  provider: HeatmapProvider,
+  now = Date.now(),
+): { momentum: Record<string, number>; meta: IndustryMomentumMeta } | null {
+  try {
+    const key = getMomentumCacheKey(provider)
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { version?: unknown }
+    const record = parsePersistedIndustryMomentum(parsed, now)
+    if (!record) {
+      localStorage.removeItem(key)
+      return null
+    }
+    return {
+      momentum: record.momentum,
+      meta: {
+        mode: 'last-session',
+        origin: record.origin,
+        sourceProvider: parsed.version === 1 ? provider : record.sourceProvider,
+        scope: record.scope,
+        boundary: record.boundary,
+        capturedAt: record.capturedAt,
+        tradeDate: record.tradeDate,
+        windowMinutes: record.windowMinutes,
+        ...(record.coverage ? { coverage: record.coverage } : {}),
+      },
+    }
+  } catch {
+    return null
+  }
+}
+
+function persistMomentum(
+  provider: HeatmapProvider,
+  momentum: Record<string, number>,
+  capturedAt: number,
+  windowMinutes: number,
+): void {
+  try {
+    const record = createPersistedIndustryMomentum(momentum, capturedAt, windowMinutes, {
+      origin: 'live-capture',
+      sourceProvider: provider,
+      scope: 'provider-snapshot',
+      boundary: 'live',
+    })
+    localStorage.setItem(getMomentumCacheKey(provider), JSON.stringify(record))
+  } catch {
+    // localStorage 不可用时仅保留当前会话状态。
+  }
+}
+
+function persistRecoveredMomentum(
+  provider: HeatmapProvider,
+  recovered: {
+    sourceProvider: 'eastmoney'
+    boundary: 'lunch-close' | 'market-close'
+    capturedAt: number
+    windowMinutes: number
+    momentum: Record<string, number>
+    coverage: IndustryMomentumMeta['coverage']
+  },
+): void {
+  try {
+    const existing = readPersistedMomentum(provider)
+    if (
+      existing
+      && existing.meta.windowMinutes === recovered.windowMinutes
+      && existing.meta.capturedAt >= recovered.capturedAt
+    ) return
+    const record = createPersistedIndustryMomentum(
+      recovered.momentum,
+      recovered.capturedAt,
+      recovered.windowMinutes,
+      {
+        origin: 'historical-recovery',
+        sourceProvider: recovered.sourceProvider,
+        scope: recovered.coverage?.l2.total
+          ? 'shenwan-l1-l2'
+          : 'shenwan-l1',
+        boundary: recovered.boundary,
+        coverage: recovered.coverage,
+      },
+    )
+    localStorage.setItem(getMomentumCacheKey(provider), JSON.stringify(record))
+  } catch {
+    // localStorage 不可用时由调用方保留当前会话状态。
+  }
 }
 
 export type Tab = 'feed' | 'sources' | 'settings' | 'ai-config' | 'ai-analysis' | 'datasource' | 'stock-chart' | 'market-heatmap' | 'industry-heatmap' | 'short-term-strategy' | 'trend-watcher' | 'decision-center'
@@ -354,11 +450,15 @@ interface AppState {
   heatmapPollingStarted: boolean
   heatmapHistory: HeatmapHistoryEntry[]
   industryMomentum: Record<string, number>
+  industryMomentumMeta: IndustryMomentumMeta | null
+  heatmapMomentumRecoveryLoading: boolean
+  heatmapMomentumRecoveryError: string
   // FR-115: 双 provider 缓存
   heatmapSnapshotByProvider: Record<HeatmapProvider, MarketSnapshot | null>
   heatmapHistoryByProvider: Record<HeatmapProvider, HeatmapHistoryEntry[]>
   activeHeatmapProvider: HeatmapProvider
   fetchHeatmapSnapshot: () => Promise<void>
+  recoverHeatmapMomentum: (forceRefresh?: boolean) => Promise<void>
   initHeatmapPolling: () => void
   setHeatmapProvider: (provider: HeatmapProvider) => Promise<void>
 
@@ -441,6 +541,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   heatmapPollingStarted: false,
   heatmapHistory: [],
   industryMomentum: {},
+  industryMomentumMeta: null,
+  heatmapMomentumRecoveryLoading: false,
+  heatmapMomentumRecoveryError: '',
   // FR-115: 双 provider 缓存初始状态（FR-132 扩展为三 provider）
   heatmapSnapshotByProvider: { sina: null, eastmoney: null, tushare: null },
   heatmapHistoryByProvider: { sina: [], eastmoney: [], tushare: [] },
@@ -860,30 +963,26 @@ export const useAppStore = create<AppState>((set, get) => ({
           { snapshot, fetchedAt: now }
         ].slice(-HEATMAP_HISTORY_MAX)
 
-        // 计算动量：找最接近 N 分钟前的最早一条历史记录
-        const windowMs = Math.max(10_000, (get().settings?.momentumWindowMinutes ?? 3) * 60_000 - 10_000)
-        const cutoff = now - windowMs
-        const baseline = newHistory.find(h => h.fetchedAt <= cutoff)
-        let momentum: Record<string, number> = {}
-        if (baseline) {
-          // FR-120: 同时纳入 L1 加权涨跌 + L2 子行业涨跌（东财 provider 才有 subIndustries）
-          const baseMap = new Map<string, number>()
-          for (const i of baseline.snapshot.industries) {
-            baseMap.set(i.name, i.weightedChange)
-            for (const sub of i.subIndustries ?? []) baseMap.set(sub.name, sub.change)
+        const momentumWindowMinutes = get().settings?.momentumWindowMinutes ?? 3
+        const computedMomentum = computeIndustryMomentum(newHistory, momentumWindowMinutes)
+        let momentum = computedMomentum
+        let momentumMeta: IndustryMomentumMeta | null = null
+        if (isInTradingHours(now) && hasMeaningfulIndustryMomentum(computedMomentum)) {
+          persistMomentum(targetProvider, computedMomentum, now, momentumWindowMinutes)
+          momentumMeta = {
+            mode: 'live',
+            origin: 'live-capture',
+            sourceProvider: targetProvider,
+            scope: 'provider-snapshot',
+            boundary: 'live',
+            capturedAt: now,
+            tradeDate: getBeijingDate(now),
+            windowMinutes: momentumWindowMinutes,
           }
-          for (const ind of snapshot.industries) {
-            const base = baseMap.get(ind.name)
-            if (base !== undefined) {
-              momentum[ind.name] = parseFloat((ind.weightedChange - base).toFixed(3))
-            }
-            for (const sub of ind.subIndustries ?? []) {
-              const subBase = baseMap.get(sub.name)
-              if (subBase !== undefined) {
-                momentum[sub.name] = parseFloat((sub.change - subBase).toFixed(3))
-              }
-            }
-          }
+        } else {
+          const persisted = readPersistedMomentum(targetProvider, now)
+          momentum = persisted?.momentum ?? {}
+          momentumMeta = persisted?.meta ?? null
         }
 
         // FR-115: 写入 byProvider 槽位（无论当前 active 是否仍是 targetProvider）
@@ -898,7 +997,8 @@ export const useAppStore = create<AppState>((set, get) => ({
             heatmapHistoryByProvider: nextHistoryMap,
             heatmapSnapshot: snapshot,
             heatmapHistory: newHistory,
-            industryMomentum: momentum
+            industryMomentum: momentum,
+            industryMomentumMeta: momentumMeta,
           })
         } else {
           set({
@@ -923,22 +1023,93 @@ export const useAppStore = create<AppState>((set, get) => ({
           }
         } catch { /* 写入失败静默忽略 */ }
       } else {
-        const msgMap: Record<string, string> = {
-          UPSTREAM_TIMEOUT: res.message ?? '数据源接口超时，请稍后重试',
-          UPSTREAM_ERROR: `数据获取失败：${res.message}`,
-          EMPTY_DATA: '数据源返回空数据'
-        }
+        const hasSnapshot = get().heatmapSnapshotByProvider[targetProvider] !== null
+        const message = buildHeatmapFailureMessage(targetProvider, res, hasSnapshot)
         // FR-115: 仅在请求期间未切换 provider 时才写错误（否则错误属于另一个 provider，不打扰用户）
         if (get().activeHeatmapProvider === targetProvider) {
-          set({ heatmapError: msgMap[res.code] ?? res.message })
+          set({ heatmapError: message })
         }
       }
-    } catch (err) {
+    } catch {
       if (get().activeHeatmapProvider === targetProvider) {
-        set({ heatmapError: err instanceof Error ? err.message : String(err) })
+        const hasSnapshot = get().heatmapSnapshotByProvider[targetProvider] !== null
+        set({
+          heatmapError: buildHeatmapFailureMessage(
+            targetProvider,
+            { code: 'UPSTREAM_ERROR' },
+            hasSnapshot,
+          )
+        })
       }
     } finally {
       set({ heatmapLoading: false })
+    }
+  },
+
+  recoverHeatmapMomentum: async (forceRefresh = false) => {
+    let targetProvider = get().activeHeatmapProvider
+    if (!get().heatmapPollingStarted) {
+      try {
+        targetProvider = await window.api.settings.getMarketHeatmapProvider()
+      } catch {
+        // 设置读取失败时使用当前内存中的 provider。
+      }
+    }
+    const windowMinutes = get().settings?.momentumWindowMinutes ?? 3
+    const existing = readPersistedMomentum(targetProvider)
+    heatmapMomentumRecoveryPendingCount += 1
+    set({ heatmapMomentumRecoveryLoading: true, heatmapMomentumRecoveryError: '' })
+    try {
+      const response = await window.api.marketHeatmap.recoverMomentum({
+        windowMinutes,
+        includeL2: targetProvider !== 'sina',
+        forceRefresh,
+        ...(existing?.meta.origin === 'historical-recovery'
+          && existing.meta.boundary !== 'live'
+          ? {
+              existingRecord: {
+                tradeDate: existing.meta.tradeDate,
+                boundary: existing.meta.boundary,
+                windowMinutes: existing.meta.windowMinutes,
+              },
+            }
+          : {}),
+      })
+      if (!response.ok) {
+        if (get().activeHeatmapProvider === targetProvider || !get().heatmapPollingStarted) {
+          set({ heatmapMomentumRecoveryError: response.message })
+        }
+        return
+      }
+      if (!response.data) {
+        const stillActive = get().activeHeatmapProvider === targetProvider || !get().heatmapPollingStarted
+        if (stillActive && existing) {
+          set({
+            activeHeatmapProvider: targetProvider,
+            industryMomentum: existing.momentum,
+            industryMomentumMeta: existing.meta,
+          })
+        }
+        return
+      }
+
+      persistRecoveredMomentum(targetProvider, response.data)
+      const persisted = readPersistedMomentum(targetProvider)
+      const stillActive = get().activeHeatmapProvider === targetProvider || !get().heatmapPollingStarted
+      if (stillActive && persisted) {
+        set({
+          activeHeatmapProvider: targetProvider,
+          industryMomentum: persisted.momentum,
+          industryMomentumMeta: persisted.meta,
+        })
+      }
+    } catch {
+      if (get().activeHeatmapProvider === targetProvider || !get().heatmapPollingStarted) {
+        set({ heatmapMomentumRecoveryError: '历史分钟数据暂不可用，请稍后重试' })
+      }
+    } finally {
+      heatmapMomentumRecoveryPendingCount = Math.max(0, heatmapMomentumRecoveryPendingCount - 1)
+      set({ heatmapMomentumRecoveryLoading: heatmapMomentumRecoveryPendingCount > 0 })
     }
   },
 
@@ -969,14 +1140,18 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // 派生顶层字段（基于当前 active provider 的槽位）
       const activeSnapshot = snapMap[provider]
+      const persistedMomentum = readPersistedMomentum(provider)
       set({
         activeHeatmapProvider: provider,
         heatmapSnapshotByProvider: snapMap,
         heatmapSnapshot: activeSnapshot,
+        industryMomentum: persistedMomentum?.momentum ?? {},
+        industryMomentumMeta: persistedMomentum?.meta ?? null,
         heatmapPollingStarted: true
       })
 
-      get().fetchHeatmapSnapshot()
+      await get().recoverHeatmapMomentum()
+      await get().fetchHeatmapSnapshot()
     })()
   },
 
@@ -993,33 +1168,38 @@ export const useAppStore = create<AppState>((set, get) => ({
     const cachedSnapshot = get().heatmapSnapshotByProvider[provider]
     const cachedHistory = get().heatmapHistoryByProvider[provider] ?? []
 
-    // ③ 基于槽位历史重算动量
-    const windowMs = Math.max(10_000, (get().settings?.momentumWindowMinutes ?? 3) * 60_000 - 10_000)
-    let momentum: Record<string, number> = {}
-    if (cachedSnapshot && cachedHistory.length > 0) {
-      const lastEntry = cachedHistory[cachedHistory.length - 1]
-      const cutoff = lastEntry.fetchedAt - windowMs
-      const baseline = cachedHistory.find(h => h.fetchedAt <= cutoff)
-      if (baseline) {
-        // FR-120: 同时纳入 L1 + L2 子行业
-        const baseMap = new Map<string, number>()
-        for (const i of baseline.snapshot.industries) {
-          baseMap.set(i.name, i.weightedChange)
-          for (const sub of i.subIndustries ?? []) baseMap.set(sub.name, sub.change)
-        }
-        for (const ind of cachedSnapshot.industries) {
-          const base = baseMap.get(ind.name)
-          if (base !== undefined) {
-            momentum[ind.name] = parseFloat((ind.weightedChange - base).toFixed(3))
-          }
-          for (const sub of ind.subIndustries ?? []) {
-            const subBase = baseMap.get(sub.name)
-            if (subBase !== undefined) {
-              momentum[sub.name] = parseFloat((sub.change - subBase).toFixed(3))
-            }
-          }
-        }
+    // ③ 只有最新样本仍处于盘中且足够新鲜时才标为实时，否则恢复上次盘中结果。
+    const now = Date.now()
+    const momentumWindowMinutes = get().settings?.momentumWindowMinutes ?? 3
+    const lastEntry = cachedHistory[cachedHistory.length - 1]
+    const computedMomentum = cachedSnapshot
+      ? computeIndustryMomentum(cachedHistory, momentumWindowMinutes)
+      : {}
+    const canReuseLive = Boolean(
+      lastEntry
+      && isInTradingHours(now)
+      && isInTradingHours(lastEntry.fetchedAt)
+      && now - lastEntry.fetchedAt <= HEATMAP_LIVE_FRESHNESS_MS
+      && hasMeaningfulIndustryMomentum(computedMomentum),
+    )
+    let momentum = computedMomentum
+    let momentumMeta: IndustryMomentumMeta | null = null
+    if (canReuseLive && lastEntry) {
+      persistMomentum(provider, computedMomentum, lastEntry.fetchedAt, momentumWindowMinutes)
+      momentumMeta = {
+        mode: 'live',
+        origin: 'live-capture',
+        sourceProvider: provider,
+        scope: 'provider-snapshot',
+        boundary: 'live',
+        capturedAt: lastEntry.fetchedAt,
+        tradeDate: getBeijingDate(lastEntry.fetchedAt),
+        windowMinutes: momentumWindowMinutes,
       }
+    } else {
+      const persisted = readPersistedMomentum(provider, now)
+      momentum = persisted?.momentum ?? {}
+      momentumMeta = persisted?.meta ?? null
     }
 
     // ④ 瞬间切换：派生写入顶层字段（如槽位为空则展示「暂无数据」但不弹错）
@@ -1028,10 +1208,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       heatmapSnapshot: cachedSnapshot,
       heatmapHistory: cachedHistory,
       industryMomentum: momentum,
+      industryMomentumMeta: momentumMeta,
       heatmapError: ''
     })
 
-    // ⑤ fire-and-forget 后台静默更新
+    // ⑤ 午休/盘后先恢复真实分钟边界，再后台静默更新当前截面。
+    await get().recoverHeatmapMomentum()
     void get().fetchHeatmapSnapshot()
   },
 
