@@ -1175,6 +1175,17 @@ export interface MarketTimelineDailyRow {
   limit_down: number
 }
 
+export interface MarketResonanceDailySnapshotRow {
+  trade_date: string
+  data_mode: 'archive' | 'partial'
+  source_label: string
+  coverage_available: number
+  coverage_total: number
+  snapshot_json: string
+  snapshot_sha256: string
+  captured_at: number
+}
+
 export interface FreeMinuteCacheRow {
   providerId: string
   tsCode: string

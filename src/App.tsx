@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { useAppStore } from './store/appStore'
 import { isInTradingHours } from './utils/tradingHours'
+import { getBeijingMinuteKey, isInClosingMomentumCaptureWindow } from './utils/heatmapMomentum'
 import { FilterBar } from './components/FilterBar/FilterBar'
 import { DateArchive } from './components/DateArchive/DateArchive'
 import { BriefingFeed } from './components/BriefingFeed/BriefingFeed'
@@ -250,6 +251,7 @@ export default function App() {
     heatmapPollingStarted,
     initHeatmapPolling,
     fetchHeatmapSnapshot,
+    recoverHeatmapMomentum,
     shortTermActiveSubTab,
     setShortTermActiveSubTab,
     aiAnalysisSubTab,
@@ -260,6 +262,8 @@ export default function App() {
     openPremarketScenario
   } = useAppStore()
   const navShellRef = useRef<HTMLDivElement>(null)
+  const heatmapCloseCaptureMinuteRef = useRef<string | null>(null)
+  const configuredMomentumWindowMinutes = settings?.momentumWindowMinutes ?? null
   const highImpactCount = useMemo(
     () => briefings.filter(item => item.impactRating === 'CRITICAL' || item.impactRating === 'IMPORTANT').length,
     [briefings]
@@ -291,6 +295,12 @@ export default function App() {
   }, [])
 
   useEffect(() => subscribeAppToast(setAppToast), [])
+
+  // 午休、盘后或休市日启动时主动还原最近交易边界，不要求行业云图曾在盘中打开。
+  useEffect(() => {
+    if (configuredMomentumWindowMinutes == null) return
+    void recoverHeatmapMomentum()
+  }, [configuredMomentumWindowMinutes, recoverHeatmapMomentum])
 
   useEffect(() => window.api.premarket.onOpenScenario(openPremarketScenario), [openPremarketScenario])
 
@@ -535,25 +545,47 @@ export default function App() {
     void runInitializationFlow(taskKey)
   }
 
-  // FR-099: 首次进入行业云图 Tab 时启动轮询
+  // 行业云图可见时每 60s 刷新；离开页面立即停止，重新进入时先补一次当前快照。
   useEffect(() => {
-    if (activeTab === 'industry-heatmap' && !heatmapPollingStarted) {
+    if (activeTab !== 'industry-heatmap') return
+    if (!heatmapPollingStarted) {
       initHeatmapPolling()
+      return
     }
-  }, [activeTab, heatmapPollingStarted])
 
-  // FR-099: 全局 60s 轮询，不随 Tab 切换停止
-  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  useEffect(() => {
-    if (!heatmapPollingStarted) return
-    if (pollingIntervalRef.current !== null) return // 已经在运行
-    pollingIntervalRef.current = setInterval(() => {
+    void fetchHeatmapSnapshot()
+    const interval = window.setInterval(() => {
       if (isInTradingHours()) {
-        fetchHeatmapSnapshot()
+        void fetchHeatmapSnapshot()
       }
     }, 60_000)
-    // 注意：此 interval 有意不清除（全局持续运行）
-  }, [heatmapPollingStarted])
+    return () => window.clearInterval(interval)
+  }, [activeTab, heatmapPollingStarted, initHeatmapPolling, fetchHeatmapSnapshot])
+
+  // 盘后回看只需保留收盘窗口样本；行业云图不在前台时执行有界补采，不恢复全天后台轮询。
+  useEffect(() => {
+    if (activeTab === 'industry-heatmap') return
+
+    const capture = () => {
+      const now = Date.now()
+      const momentumWindowMinutes = settings?.momentumWindowMinutes ?? 3
+      if (!isInClosingMomentumCaptureWindow(now, momentumWindowMinutes)) return
+
+      const minuteKey = getBeijingMinuteKey(now)
+      if (heatmapCloseCaptureMinuteRef.current === minuteKey) return
+      heatmapCloseCaptureMinuteRef.current = minuteKey
+
+      if (!heatmapPollingStarted) {
+        initHeatmapPolling()
+        return
+      }
+      void fetchHeatmapSnapshot()
+    }
+
+    capture()
+    const interval = window.setInterval(capture, 15_000)
+    return () => window.clearInterval(interval)
+  }, [activeTab, settings?.momentumWindowMinutes, heatmapPollingStarted, initHeatmapPolling, fetchHeatmapSnapshot])
 
   // Subscribe to push events from main process
   useEffect(() => {

@@ -58,6 +58,14 @@ export interface MarketOverviewSnapshot {
   isHistorical?: boolean
   /** 历史模式下来源交易日，格式 YYYYMMDD */
   tradeDate?: string
+  coverage: {
+    distribution: { available: boolean; sampleCount: number }
+    timeline: { mode: 'exact' | 'approximate' | 'missing'; pointCount: number }
+  }
+}
+
+export interface MarketOverviewSnapshotRequest {
+  tradeDate?: string | null
 }
 
 // ─── 模块级状态 ───────────────────────────────────────────────
@@ -295,12 +303,15 @@ function getBjYmd(): string {
 // ─── 历史 Fallback（rtKCache 为空时读 daily_close_cache） ─────
 
 /** 从 daily_close_cache 最新 trade_date 构建涨跌分布（9 档，同 computeDistribution 逻辑） */
-function buildHistoricalDistribution(db: Database.Database): { bins: DistributionBin[]; tradeDate: string } {
-  const dateRow = db
-    .prepare(`SELECT MAX(trade_date) AS td FROM daily_close_cache`)
-    .get() as { td: string | null }
+function buildHistoricalDistribution(
+  db: Database.Database,
+  requestedTradeDate: string | null,
+): { bins: DistributionBin[]; tradeDate: string; sampleCount: number } {
+  const dateRow = requestedTradeDate
+    ? { td: requestedTradeDate }
+    : db.prepare(`SELECT MAX(trade_date) AS td FROM daily_close_cache`).get() as { td: string | null }
   const tradeDate = dateRow?.td ?? ''
-  if (!tradeDate) return { bins: [], tradeDate: '' }
+  if (!tradeDate) return { bins: [], tradeDate: '', sampleCount: 0 }
 
   const rows = db
     .prepare(`SELECT pct_chg FROM daily_close_cache WHERE trade_date = ? AND pct_chg IS NOT NULL`)
@@ -322,71 +333,8 @@ function buildHistoricalDistribution(db: Database.Database): { bins: Distributio
       count: counts[i],
       isPositive: bin.isPositive,
     })),
+    sampleCount: rows.length,
   }
-}
-
-/** 从 daily_close_cache 构建概念热度（替代 rtKCache） */
-function buildHistoricalConceptHeat(db: Database.Database, tradeDate: string): ConceptHeat[] {
-  // 用 daily_close_cache 构建 tsCode→pctChg Map
-  const rows = db
-    .prepare(`SELECT ts_code, pct_chg FROM daily_close_cache WHERE trade_date = ? AND pct_chg IS NOT NULL`)
-    .all(tradeDate) as { ts_code: string; pct_chg: number }[]
-  if (rows.length === 0) return []
-
-  const pctMap = new Map<string, number>()
-  for (const r of rows) pctMap.set(r.ts_code, r.pct_chg)
-  // 同 computeConceptHeat 的步骤1+2
-  const themeRows = db
-    .prepare(`SELECT DISTINCT theme FROM kpl_concept_daily WHERE theme IS NOT NULL ORDER BY trade_date DESC LIMIT 5000`)
-    .all() as { theme: string }[]
-  const activeThemeNames = new Set<string>()
-  for (const row of themeRows) {
-    if (!row.theme) continue
-    for (const t of row.theme.split(/[,、，]/)) {
-      const name = t.trim()
-      if (name) activeThemeNames.add(name)
-    }
-  }
-  if (activeThemeNames.size === 0) return []
-
-  // 按题材名（name 列）匹配 activeThemeNames，获取题材代码（ts_code 列）
-  // 列语义回顾：ts_code=题材代码 / con_code=股票代码 / name=题材名 / con_name=股票名
-  const placeholders = [...activeThemeNames].map(() => '?').join(',')
-  const conceptRows = db
-    .prepare(`SELECT DISTINCT ts_code AS conceptCode, name AS conceptName FROM kpl_concept_members WHERE name IN (${placeholders})`)
-    .all([...activeThemeNames]) as { conceptCode: string; conceptName: string }[]
-  const results: ConceptHeat[] = []
-  for (const { conceptCode, conceptName: conName } of conceptRows) {
-    // 取该题材的所有成员股（con_code = 股票 ts_code，格式如 000001.SZ）
-    const members = db
-      .prepare(`SELECT con_code FROM kpl_concept_members WHERE ts_code = ?`)
-      .all(conceptCode) as { con_code: string }[]
-
-    let totalChange = 0
-    let validCount = 0
-    let limitUpCount = 0
-
-    for (const { con_code: memberTsCode } of members) {
-      const pct = pctMap.get(memberTsCode)
-      if (pct === undefined) continue
-      validCount++
-      totalChange += pct
-      // 历史模式：涨停判定用固定 9.8% 阈值（无 name 信息区分 ST/科创）
-      if (pct >= 9.8) limitUpCount++
-    }
-    if (validCount < 3) continue
-
-    results.push({
-      conCode: conceptCode,
-      conName,
-      memberCount: validCount,
-      avgChange: parseFloat((totalChange / validCount).toFixed(2)),
-      limitUpCount,
-      limitDownCount: 0,
-    })
-  }
-  results.sort((a, b) => (b.limitUpCount * 3 + b.avgChange) - (a.limitUpCount * 3 + a.avgChange))
-  return results
 }
 
 /** A股交易时段标准时间桶（含集合竞价 09:25） */
@@ -472,12 +420,22 @@ function restoreTodayTimelineFromDb(db: Database.Database): void {
   }
 }
 
-export function getMarketOverviewSnapshot(db: Database.Database): MarketOverviewSnapshot {
+export function getMarketOverviewSnapshot(
+  db: Database.Database,
+  request: MarketOverviewSnapshotRequest = {},
+): MarketOverviewSnapshot {
+  const requestedTradeDate = normalizeTradeDate(request.tradeDate)
   const cache = getRtKCache()
   // 双重条件：① trade_cal 确认今天是交易日（含调休补班日，排除假期/周末）
   //            ② rtKCache 有今日实时数据
   // trade_cal 未拉到时 fallback weekday 判断（周六/周日=false，仍然正确走历史路径）
-  if (isTodayTradingDay() && isRtKFromToday() && cache && cache.size > 0) {
+  if (
+    (!requestedTradeDate || requestedTradeDate === getBjYmd())
+    && isTodayTradingDay()
+    && isRtKFromToday()
+    && cache
+    && cache.size > 0
+  ) {
     // 从 DB 恢复今日已记录的时间序列（重启后断点续传）
     restoreTodayTimelineFromDb(db)
     // 应用刚启动时 timeline 可能仍为空（60s cron 尚未触发），立即播种一个当前时刻的点
@@ -489,18 +447,77 @@ export function getMarketOverviewSnapshot(db: Database.Database): MarketOverview
       timeline: [..._todayTimeline],
       conceptHeat: getConceptHeat(db),
       generatedAt: Date.now(),
+      coverage: {
+        distribution: { available: cache.size > 0, sampleCount: cache.size },
+        timeline: {
+          mode: _todayTimeline.length > 0 ? 'exact' : 'missing',
+          pointCount: _todayTimeline.length,
+        },
+      },
     }
   }
   // rtKCache 无今日数据 → 读 daily_close_cache 历史数据
-  const { bins, tradeDate } = buildHistoricalDistribution(db)
-  const conceptHeat = tradeDate ? buildHistoricalConceptHeat(db, tradeDate) : []
-  const timeline = tradeDate ? buildHistoricalTimeline(db, tradeDate) : []
+  const { bins, tradeDate, sampleCount } = buildHistoricalDistribution(db, requestedTradeDate)
+  // FR-261: 历史模式不投影概念热度, 避免把题材截面伪装成同日可回看事实
+  const conceptHeat: ConceptHeat[] = []
+  const timelineResult = tradeDate
+    ? resolveHistoricalTimeline(db, tradeDate)
+    : { points: [], mode: 'missing' as const }
   return {
     distribution: bins,
-    timeline,
+    timeline: timelineResult.points,
     conceptHeat,
     generatedAt: Date.now(),
     isHistorical: true,
     tradeDate,
+    coverage: {
+      distribution: { available: sampleCount > 0, sampleCount },
+      timeline: { mode: timelineResult.mode, pointCount: timelineResult.points.length },
+    },
   }
+}
+
+function resolveHistoricalTimeline(
+  db: Database.Database,
+  tradeDate: string,
+): { points: MarketTimelinePoint[]; mode: 'exact' | 'approximate' | 'missing' } {
+  try {
+    const exactRows = getTimelineByDate(db, tradeDate)
+    if (exactRows.length > 0) {
+      return {
+        points: exactRows.map((row) => ({
+          time: row.time,
+          limitUp: row.limit_up,
+          limitDown: row.limit_down,
+        })),
+        mode: 'exact',
+      }
+    }
+  } catch (error) {
+    console.warn('[MarketTimeline] resolveHistoricalTimeline exact read failed:', error)
+  }
+  // 精确时间线缺失时, 才用同日涨跌停事件近似重建
+  const approximate = buildHistoricalTimeline(db, tradeDate)
+  return {
+    points: approximate,
+    mode: approximate.length > 0 ? 'approximate' : 'missing',
+  }
+}
+
+function normalizeTradeDate(value: string | null | undefined): string | null {
+  if (value == null || value === '') return null
+  if (!isValidCompactDate(value)) throw new Error('INVALID_MARKET_OVERVIEW_REQUEST')
+  if (value > getBjYmd()) throw new Error('INVALID_MARKET_OVERVIEW_REQUEST')
+  return value
+}
+
+function isValidCompactDate(value: string): boolean {
+  if (!/^\d{8}$/.test(value)) return false
+  const year = Number(value.slice(0, 4))
+  const month = Number(value.slice(4, 6))
+  const day = Number(value.slice(6, 8))
+  const parsed = new Date(Date.UTC(year, month - 1, day))
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day
 }

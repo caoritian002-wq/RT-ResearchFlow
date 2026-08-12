@@ -187,6 +187,42 @@ export function getLatestVerifiedObservationDateBefore(
   return row?.trade_date ?? null
 }
 
+export function listVerifiedObservationDates(db: Database.Database): string[] {
+  const rows = db.prepare(`
+    SELECT DISTINCT trade_date
+    FROM sector_flow_observations
+    WHERE provider = 'eastmoney' AND metric_kind = 'verified_flow'
+    ORDER BY trade_date ASC
+  `).all() as Array<{ trade_date: string }>
+  return rows.map((row) => row.trade_date)
+}
+
+export function getVerifiedObservationMetadata(
+  db: Database.Database,
+  tradeDate: string,
+): { capturedAt: number; sourceUpdatedAt: number | null; itemCount: number } | null {
+  const row = db.prepare(`
+    SELECT
+      MAX(captured_at) AS captured_at,
+      MAX(source_updated_at) AS source_updated_at,
+      COUNT(*) AS item_count
+    FROM sector_flow_observations
+    WHERE trade_date = ?
+      AND provider = 'eastmoney'
+      AND metric_kind = 'verified_flow'
+  `).get(tradeDate) as {
+    captured_at: number | null
+    source_updated_at: number | null
+    item_count: number
+  } | undefined
+  if (!row || row.item_count <= 0 || row.captured_at == null) return null
+  return {
+    capturedAt: row.captured_at,
+    sourceUpdatedAt: row.source_updated_at,
+    itemCount: row.item_count,
+  }
+}
+
 export function listSectorFlowObservations(
   db: Database.Database,
   tradeDate: string,

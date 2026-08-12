@@ -6,7 +6,7 @@ import { isInTradingHours } from "../../utils/tradingHours";
 
 // FR-096/FR-099/FR-100: 自研行业云图（ECharts treemap）
 // 两实例架构：L1（行业层）始终挂载，下钻时 visibility:hidden；L2（个股层）下钻时挂载。
-// snapshot 60s 更新时两层同时静默刷新，用户在 L2 时感知不到 L1 的重绘。
+// 页面可见时 snapshot 每 60s 更新，两层同时静默刷新，用户在 L2 时感知不到 L1 的重绘。
 
 /** A 股红涨绿跌 7 档配色 */
 function colorByChange(change: number): string {
@@ -33,6 +33,21 @@ function formatTime(iso: string): string {
   } catch {
     return "--:--:--";
   }
+}
+
+function formatMomentumCapturedAt(timestamp: number): string {
+  const date = new Date(timestamp + 8 * 60 * 60 * 1000);
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const hour = String(date.getUTCHours()).padStart(2, "0");
+  const minute = String(date.getUTCMinutes()).padStart(2, "0");
+  return `${month}-${day} ${hour}:${minute}`;
+}
+
+function isClosingMomentum(timestamp: number): boolean {
+  const date = new Date(timestamp + 8 * 60 * 60 * 1000);
+  return (date.getUTCHours() === 14 && date.getUTCMinutes() >= 55)
+    || (date.getUTCHours() === 15 && date.getUTCMinutes() === 0);
 }
 
 /** 云图代码 (SZ002460) → ts_code 格式 (002460.SZ) */
@@ -118,11 +133,34 @@ export function IndustryHeatmap() {
   const errorMsg = useAppStore((s) => s.heatmapError);
   const fetchHeatmapSnapshot = useAppStore((s) => s.fetchHeatmapSnapshot);
   const industryMomentum = useAppStore((s) => s.industryMomentum);
+  const industryMomentumMeta = useAppStore((s) => s.industryMomentumMeta);
+  const momentumRecoveryLoading = useAppStore((s) => s.heatmapMomentumRecoveryLoading);
+  const momentumRecoveryError = useAppStore((s) => s.heatmapMomentumRecoveryError);
+  const recoverHeatmapMomentum = useAppStore((s) => s.recoverHeatmapMomentum);
   const settings = useAppStore((s) => s.settings);
   // FR-115: 从 store 读取当前 active provider + 切换 action
   const provider = useAppStore((s) => s.activeHeatmapProvider);
   const setHeatmapProvider = useAppStore((s) => s.setHeatmapProvider);
   const isDark = theme === "dark";
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  const trading = isInTradingHours(clockNow);
+  const historicalMomentum = Boolean(
+    industryMomentumMeta
+    && (industryMomentumMeta.mode === "last-session" || !trading),
+  );
+  const historicalRecovery = industryMomentumMeta?.origin === "historical-recovery";
+  const momentumWindowMinutes =
+    industryMomentumMeta?.windowMinutes ?? settings?.momentumWindowMinutes ?? 3;
+  const momentumBoundaryLabel = industryMomentumMeta?.boundary === "lunch-close"
+    ? "午盘前"
+    : industryMomentumMeta?.boundary === "market-close"
+      ? "收盘前"
+      : isClosingMomentum(industryMomentumMeta?.capturedAt ?? 0)
+        ? "收盘前"
+        : "盘中";
+  const momentumContextLabel = historicalMomentum && industryMomentumMeta
+    ? `${formatMomentumCapturedAt(industryMomentumMeta.capturedAt).slice(0, 5)} ${momentumBoundaryLabel} ${momentumWindowMinutes}min 变化${historicalRecovery ? " · 历史分钟恢复" : ""}`
+    : `${momentumWindowMinutes}min 变化`;
 
   const [momentumOpen, setMomentumOpen] = useState(true);
   const [hoveredIndustryName, setHoveredIndustryName] = useState<string | null>(
@@ -149,6 +187,10 @@ export function IndustryHeatmap() {
   const [tushareReady, setTushareReady] = useState(false);
   // FR-132: Tushare 申万数据源权限不足横幅控制
   const [tushareQuotaError, setTushareQuotaError] = useState(false);
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
   // FR-132: 检查 Tushare 是否启用 + token 是否配置
   useEffect(() => {
     let cancelled = false;
@@ -201,11 +243,12 @@ export function IndustryHeatmap() {
    * FR-114: hover 懒加载行业成分股（带 300ms 防抖）
    * - 鼠标在榜单行 / 浮层卡片对应行业上停留 ≥ 300ms 才发起 IPC
    * - 已缓存（hoverConstituents 命中）则不发请求
-   * - 失败静默退化：hover 卡片继续展示 snapshot 占位 stocks
-   * - 仅东财数据源会真正发上游请求；新浪由后端路由层从 lastSnapshot 读
+   * - 失败静默退化：hover 卡片继续展示行业级事实
+   * - 新浪只允许 hangye_Zxx L2 按需请求，L1 不扩散为多个 L2 请求
    */
   const scheduleLoadConstituents = useCallback(
     (industryName: string, industryCode: string | undefined) => {
+      if (provider === "sina" && !industryCode?.startsWith("hangye_")) return;
       if (hoverLoadTimer.current) {
         clearTimeout(hoverLoadTimer.current);
         hoverLoadTimer.current = null;
@@ -233,7 +276,7 @@ export function IndustryHeatmap() {
       }, 300);
     },
     // 不再依赖 hoverConstituents state（改用 ref），避免 l1Events 在每次缓存更新时重建
-    [],
+    [provider],
   );
 
   const cancelLoadConstituents = useCallback(() => {
@@ -286,6 +329,14 @@ export function IndustryHeatmap() {
     drilledIndustryRef.current = drilledIndustry;
   }, [drilledIndustry]);
 
+  // 数据源切换后旧代码体系不再有效，退出下钻并清空成分缓存。
+  useEffect(() => {
+    setDrilledIndustry(null);
+    lastDrilledDataRef.current = null;
+    setHoverConstituents(new Map());
+    hoverConstituentsRef.current = new Map();
+  }, [provider]);
+
   // snapshot 刷新时清空成分股缓存，但保留当前下钻行业的条目，避免 L2 个股层因刷新消失
   useEffect(() => {
     if (!snapshot?.updatedAt) return;
@@ -328,8 +379,9 @@ export function IndustryHeatmap() {
     const data = snapshot.industries.map((ind) => {
       const momentumDelta = industryMomentum[ind.name];
       const lazy = hoverConstituents.get(ind.name);
-      const sourceStocks = lazy ?? ind.stocks;
-      // FR-119: 子行业 children（仅东财 provider 填充 subIndustries）
+      const isSinaAggregate = provider === "sina";
+      const sourceStocks = isSinaAggregate ? [] : (lazy ?? ind.stocks);
+      // FR-119/FR-263: 东财填充申万 L2，新浪填充 GB/T 中类。
       const subChildren = (ind.subIndustries ?? []).map((sub) => ({
         name: sub.name,
         value: computeValue(sub.change, sub.marketCap, drawRule),
@@ -400,7 +452,8 @@ export function IndustryHeatmap() {
           topLosers: [...sourceStocks]
             .sort((a, b) => a.change - b.change)
             .slice(0, 3),
-          isLazyLoaded: !!lazy,
+          isLazyLoaded: isSinaAggregate || !!lazy,
+          constituentMode: isSinaAggregate ? "subIndustries" : "stocks",
         },
       };
     });
@@ -441,7 +494,9 @@ export function IndustryHeatmap() {
             const subIsLoading = !hoverConstituents.has(meta.name);
             const subLoadingHint = subIsLoading
               ? `<div style="margin-top:6px;color:#9ca3af;font-size:11px">正在加载成分股…</div>`
-              : "";
+              : subStocks.length === 0
+                ? `<div style="margin-top:6px;color:#9ca3af;font-size:11px">成分股暂不可用，刷新后可重试</div>`
+                : "";
             return [
               `<div style="font-weight:600;font-size:13px;margin-bottom:4px">${params.name} <span style="color:#9ca3af;font-weight:400;font-size:11px">子行业</span></div>`,
               `<div style="font-size:12px;line-height:1.6">涨跌幅：<b style="color:${colorByChange(meta.change)}">${sign}${meta.change.toFixed(2)}%</b></div>`,
@@ -468,7 +523,7 @@ export function IndustryHeatmap() {
             .map(fmtRow)
             .join("");
 
-          // 无个股涨跌数据时（Tushare 模式），降级展示子行业领涨/领跌
+          // 无个股涨跌数据时，展示真实的二级行业领涨/领跌。
           const fmtSubRow = (s: { name: string; change: number }) => {
             const sg = s.change >= 0 ? "+" : "";
             return `<div style="display:flex;justify-content:space-between;gap:12px;font-size:12px;line-height:1.6;">
@@ -486,7 +541,7 @@ export function IndustryHeatmap() {
 
           const momentumLine =
             meta.momentumDelta !== undefined
-              ? `<div style="font-size:12px;line-height:1.6;margin-top:4px">${settings?.momentumWindowMinutes ?? 3}min 变化：<b style="color:${colorByChange(meta.momentumDelta)}">${meta.momentumDelta >= 0 ? "+" : ""}${meta.momentumDelta.toFixed(2)}%</b></div>`
+              ? `<div style="font-size:12px;line-height:1.6;margin-top:4px">${momentumContextLabel}：<b style="color:${colorByChange(meta.momentumDelta)}">${meta.momentumDelta >= 0 ? "+" : ""}${meta.momentumDelta.toFixed(2)}%</b></div>`
               : "";
           const loadingHint =
             !meta.isLazyLoaded && (meta.topGainers?.length ?? 0) <= 1
@@ -503,7 +558,9 @@ export function IndustryHeatmap() {
             subGainersL1 ? sectionTitle("子行业领涨", "#cc0000") + subGainersL1 : "",
             subLosersL1 ? sectionTitle("子行业领跌", "#1c8a2c") + subLosersL1 : "",
             loadingHint,
-            `<div style="margin-top:6px;color:#9ca3af;font-size:11px">点击下钻查看全部成分股</div>`,
+            meta.constituentMode === "subIndustries"
+              ? `<div style="margin-top:6px;color:#9ca3af;font-size:11px">点击二级行业查看个股 Top3</div>`
+              : `<div style="margin-top:6px;color:#9ca3af;font-size:11px">点击下钻查看全部成分股</div>`,
           ]
             .filter(Boolean)
             .join("");
@@ -556,7 +613,7 @@ export function IndustryHeatmap() {
         },
       ],
     };
-  }, [snapshot, isDark, industryMomentum, settings, drawRule, hoverConstituents]);
+  }, [snapshot, isDark, industryMomentum, momentumContextLabel, drawRule, hoverConstituents, provider]);
 
   // 当前下钻行业的最新数据（始终跟随 snapshot 更新，60s 刷新无感知）
   // FR-119: 兼容 L2 下钻 —— 先在 industries 数组找 L1，找不到则在 subIndustries 里找 L2 并包装为伪 industry
@@ -658,6 +715,7 @@ export function IndustryHeatmap() {
       click: (params: any) => {
         const meta = params?.data?._meta;
         if (meta?.type === "industry" || meta?.type === "subIndustry") {
+          if (provider === "sina" && meta.type === "industry") return;
           // FR-119: L1 行业 / L2 子行业 点击都触发下钻到对应成分股
           const targetName = params.name;
           const targetCode = meta.code ?? "";
@@ -710,7 +768,7 @@ export function IndustryHeatmap() {
       },
     }),
     // 不再依赖 hoverConstituents state（改用 hoverConstituentsRef），避免频繁重建
-    [scheduleLoadConstituents, cancelLoadConstituents],
+    [scheduleLoadConstituents, cancelLoadConstituents, provider],
   );
 
   // L2 事件：点击个股 → 跳转走势图
@@ -726,11 +784,16 @@ export function IndustryHeatmap() {
     [navigateToStock],
   );
 
-  const trading = isInTradingHours();
   const lastUpdate = snapshot ? formatTime(snapshot.updatedAt) : "--:--:--";
 
   // FR-100: 动量榜单数据
-  const momentumEntries = Object.entries(industryMomentum);
+  const momentumEntries = Object.entries(industryMomentum).filter(
+    ([name, delta]) => Math.abs(delta) >= 0.0001 && (
+      historicalRecovery
+      || provider !== "sina"
+      || nameToCode.get(name)?.startsWith("hangye_")
+    ),
+  );
   const hasMomentum = momentumEntries.length > 0;
   const topMomentumGainers = momentumEntries
     .filter(([, d]) => d > 0)
@@ -741,7 +804,7 @@ export function IndustryHeatmap() {
     .sort((a, b) => a[1] - b[1])
     .slice(0, 5);
 
-  // FR-101/FR-120: 今日涨跌幅榜单 —— 东财优先用 L2 子行业，新浪 fallback 到 L1
+  // FR-101/FR-120/FR-263: 有 L2 时统一按 L2 排名；新浪总表也提供 GB/T L2。
   const subList = (snapshot?.industries ?? []).flatMap((i) =>
     (i.subIndustries ?? []).map((s) => ({
       name: s.name,
@@ -764,7 +827,16 @@ export function IndustryHeatmap() {
     .slice(0, 5);
   const hasTodayData = displayList.length > 0;
 
-  const momentumN = settings?.momentumWindowMinutes ?? 3;
+  const momentumN = momentumWindowMinutes;
+  const momentumTitle = historicalRecovery
+    ? `${momentumBoundaryLabel} ${momentumN}min 动量`
+    : historicalMomentum
+      ? `${industryMomentumMeta && isClosingMomentum(industryMomentumMeta.capturedAt) ? "收盘前" : "上次盘中"} ${momentumN}min 动量`
+    : `${momentumN}min 动量`;
+  const momentumCoverage = industryMomentumMeta?.coverage;
+  const momentumCoverageLabel = momentumCoverage
+    ? `L1 ${momentumCoverage.l1.available}${momentumCoverage.l2.total > 0 ? ` · L2 ${momentumCoverage.l2.available}` : ""}`
+    : "";
 
   return (
     <div
@@ -871,14 +943,24 @@ export function IndustryHeatmap() {
         )}
       </div>
 
-      {/* 错误横幅 */}
+      {/* 有快照时刷新失败为弱提示；只有没有任何可展示数据时才阻断。 */}
       {errorMsg && (
-        <div className="flex items-center justify-between px-4 py-2 bg-red-50 dark:bg-red-900/30 border-b border-red-200 dark:border-red-800 text-sm text-red-700 dark:text-red-300 flex-shrink-0">
-          <span>{errorMsg}</span>
+        <div
+          className={`flex items-center justify-between px-4 py-2 border-b text-sm flex-shrink-0 ${
+            snapshot
+              ? "bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800 text-yellow-800 dark:text-yellow-300"
+              : "bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300"
+          }`}
+        >
+          <span>{errorMsg}{snapshot ? `（缓存 ${lastUpdate}）` : ""}</span>
           <button
             type="button"
             onClick={() => fetchHeatmapSnapshot()}
-            className="ml-4 px-2 py-0.5 text-xs border border-red-300 dark:border-red-700 rounded hover:bg-red-100 dark:hover:bg-red-900/50"
+            className={`ml-4 px-2 py-0.5 text-xs border rounded ${
+              snapshot
+                ? "border-yellow-300 dark:border-yellow-700 hover:bg-yellow-100 dark:hover:bg-yellow-900/40"
+                : "border-red-300 dark:border-red-700 hover:bg-red-100 dark:hover:bg-red-900/50"
+            }`}
           >
             重试
           </button>
@@ -1073,13 +1155,52 @@ export function IndustryHeatmap() {
               <div className="border-t border-gray-300 dark:border-gray-600 flex-shrink-0" />
 
               {/* ── 下半区：N 分钟动量 ── */}
-              <div className="px-3 py-1.5 text-xs font-semibold text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
-                {momentumN}min 动量
+              <div className="px-3 py-1.5 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                  {momentumTitle}
+                </div>
+                {industryMomentumMeta && (
+                  <div
+                    className="mt-0.5 text-[11px] leading-4 text-gray-400 dark:text-gray-500 tabular-nums"
+                    title={historicalRecovery
+                      ? `东方财富历史分钟 · 申万行业 · ${momentumCoverageLabel}`
+                      : undefined}
+                  >
+                    <span>
+                      {historicalRecovery ? "历史恢复" : historicalMomentum ? "保留样本" : "实时样本"} · {formatMomentumCapturedAt(industryMomentumMeta.capturedAt)}
+                    </span>
+                    {historicalRecovery && momentumCoverageLabel && (
+                      <span className="block">{momentumCoverageLabel}</span>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="flex-1 overflow-y-auto">
                 {!hasMomentum ? (
                   <div className="px-3 py-3 text-xs text-gray-400 dark:text-gray-500 leading-relaxed">
-                    数据积累中，约 {momentumN} 分钟后显示动量
+                    {momentumRecoveryLoading ? (
+                      <div className="flex items-center gap-1.5">
+                        <span className="inline-block h-3 w-3 flex-shrink-0 rounded-full border-2 border-gray-300 border-t-blue-500 animate-spin dark:border-gray-600" />
+                        <span>正在恢复交易边界…</span>
+                      </div>
+                    ) : historicalRecovery && industryMomentumMeta ? (
+                      "该窗口暂无可见的行业动量变化"
+                    ) : trading ? (
+                      `数据积累中，约 ${momentumN} 分钟后显示动量`
+                    ) : momentumRecoveryError ? (
+                      <div>
+                        <div>{momentumRecoveryError}</div>
+                        <button
+                          type="button"
+                          className="mt-2 h-7 border border-gray-300 px-2 text-xs text-gray-600 hover:bg-gray-100 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800"
+                          onClick={() => void recoverHeatmapMomentum(true)}
+                        >
+                          重试恢复
+                        </button>
+                      </div>
+                    ) : (
+                      "暂无可回看的盘中动量"
+                    )}
                   </div>
                 ) : (
                   <>
@@ -1091,9 +1212,12 @@ export function IndustryHeatmap() {
                         {topMomentumGainers.map(([name, delta]) => (
                           <div
                             key={name}
-                            className="flex items-center justify-between px-3 py-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer"
-                            onClick={() => setDrilledIndustry(name)}
+                            className={`flex items-center justify-between px-3 py-0.5 ${nameToCode.has(name) ? "cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" : ""}`}
+                            onClick={() => {
+                              if (nameToCode.has(name)) setDrilledIndustry(name);
+                            }}
                             onMouseEnter={(e) => {
+                              if (!nameToCode.has(name)) return;
                               if (hoverCloseTimer.current) {
                                 clearTimeout(hoverCloseTimer.current);
                                 hoverCloseTimer.current = null;
@@ -1134,9 +1258,12 @@ export function IndustryHeatmap() {
                         {topMomentumLosers.map(([name, delta]) => (
                           <div
                             key={name}
-                            className="flex items-center justify-between px-3 py-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer"
-                            onClick={() => setDrilledIndustry(name)}
+                            className={`flex items-center justify-between px-3 py-0.5 ${nameToCode.has(name) ? "cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" : ""}`}
+                            onClick={() => {
+                              if (nameToCode.has(name)) setDrilledIndustry(name);
+                            }}
                             onMouseEnter={(e) => {
+                              if (!nameToCode.has(name)) return;
                               if (hoverCloseTimer.current) {
                                 clearTimeout(hoverCloseTimer.current);
                                 hoverCloseTimer.current = null;

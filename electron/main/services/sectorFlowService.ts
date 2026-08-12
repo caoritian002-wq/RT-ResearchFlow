@@ -5,7 +5,9 @@ import { emitDecisionSignals, type DecisionSignalInput } from './decisionSignalS
 import {
   getLatestVerifiedObservationDate,
   getPreviousVerifiedFlowMap,
+  getVerifiedObservationMetadata,
   listSectorFlowObservations,
+  listVerifiedObservationDates,
   upsertSectorFlowObservations,
 } from '../database/sectorFlowObservationRepository'
 import {
@@ -21,6 +23,7 @@ import type {
   SectorFlowScope,
   SectorFlowSnapshot,
   SectorFlowStock,
+  SectorFlowWorkbenchSnapshot,
 } from './sectorFlowTypes'
 
 export type {
@@ -32,6 +35,7 @@ export type {
   SectorFlowSnapshot,
   SectorFlowStock,
   SectorFlowThemeGuidance,
+  SectorFlowWorkbenchSnapshot,
 } from './sectorFlowTypes'
 
 const CACHE_TTL_MS = 60_000
@@ -45,6 +49,29 @@ interface ConceptBucket {
 
 export function invalidateSectorFlowCache(): void {
   cache = null
+}
+
+export interface SectorFlowWorkbenchRequest {
+  tradeDate?: string | null
+  forceRefresh?: boolean
+}
+
+export async function getSectorFlowWorkbenchSnapshot(
+  db: Database.Database,
+  request: SectorFlowWorkbenchRequest = {},
+): Promise<SectorFlowWorkbenchSnapshot> {
+  const requestedTradeDate = request.tradeDate ?? null
+  const snapshot = requestedTradeDate
+    ? loadVerifiedSnapshot(db, requestedTradeDate, 'history')
+    : await computeSectorFlowSnapshot(db, request.forceRefresh === true)
+  if (!snapshot) throw new Error('SECTOR_FLOW_HISTORY_UNAVAILABLE')
+  if (requestedTradeDate && snapshot.tradeDate !== requestedTradeDate) {
+    throw new Error('SECTOR_FLOW_HISTORY_DATE_MISMATCH')
+  }
+  return {
+    ...snapshot,
+    navigation: buildSectorFlowNavigation(db, snapshot.tradeDate),
+  }
 }
 
 export async function computeSectorFlowSnapshot(
@@ -126,35 +153,70 @@ function loadLatestVerifiedSnapshot(db: Database.Database): SectorFlowSnapshot |
   try {
     const tradeDate = getLatestVerifiedObservationDate(db)
     if (!tradeDate) return null
-    const previousMap = getPreviousVerifiedFlowMap(db, tradeDate)
-    const archivedItems = listSectorFlowObservations(db, tradeDate, 'eastmoney').map((item) => ({
-      ...item,
-      previousMainNetInflow: previousMap.get(itemKey(item.scope, item.boardCode)) ?? null,
-    }))
-    if (archivedItems.length === 0) return null
-    const membersByBoard = new Map(archivedItems.map((item) => [item.boardCode, item.coreStocks]))
-    const result = buildSectorFlowGuidance(archivedItems, membersByBoard)
-    const sourceUpdatedAt = Math.max(...result.items.map((item) => item.sourceUpdatedAt ?? 0))
-    return {
-      items: sortDisplayItems(result.items),
-      guidance: result.guidance,
-      tradeDate,
-      updatedAt: sourceUpdatedAt > 0 ? new Date(sourceUpdatedAt).toISOString() : compactDateToIso(tradeDate),
-      capturedAt: Date.now(),
-      dataMode: 'archive',
-      metricMode: 'verified_flow',
-      provider: 'eastmoney',
-      sourceLabel: '东方财富板块主力资金（最近存档）',
-      quality: {
-        isVerified: true,
-        partialScopes: [],
-        archived: true,
-        message: '实时接口暂不可用，当前展示最近一次已核验的本地存档。',
-      },
-    }
+    return loadVerifiedSnapshot(db, tradeDate, 'latest-fallback')
   } catch (error) {
     console.warn('[sectorFlowService] archived flow unavailable:', error)
     return null
+  }
+}
+
+function loadVerifiedSnapshot(
+  db: Database.Database,
+  tradeDate: string,
+  mode: 'history' | 'latest-fallback',
+): SectorFlowSnapshot | null {
+  const metadata = getVerifiedObservationMetadata(db, tradeDate)
+  if (!metadata) return null
+  const previousMap = getPreviousVerifiedFlowMap(db, tradeDate)
+  const archivedItems = listSectorFlowObservations(db, tradeDate, 'eastmoney').map((item) => ({
+    ...item,
+    previousMainNetInflow: previousMap.get(itemKey(item.scope, item.boardCode)) ?? null,
+  }))
+  if (archivedItems.length === 0) return null
+  const membersByBoard = new Map(archivedItems.map((item) => [item.boardCode, item.coreStocks]))
+  const result = buildSectorFlowGuidance(archivedItems, membersByBoard)
+  const scopes = new Set(result.items.map((item) => item.scope))
+  const partialScopes = (['concept', 'industry'] as const).filter((scope) => !scopes.has(scope))
+  const updatedAt = metadata.sourceUpdatedAt ?? metadata.capturedAt
+  return {
+    items: sortDisplayItems(result.items),
+    guidance: result.guidance,
+    tradeDate,
+    updatedAt: new Date(updatedAt).toISOString(),
+    capturedAt: metadata.capturedAt,
+    dataMode: 'archive',
+    metricMode: 'verified_flow',
+    provider: 'eastmoney',
+    sourceLabel: mode === 'history'
+      ? '东方财富板块主力资金（本地历史存档）'
+      : '东方财富板块主力资金（最近存档）',
+    quality: {
+      isVerified: true,
+      partialScopes,
+      archived: true,
+      message: mode === 'history'
+        ? `当前展示 ${formatCompactTradeDate(tradeDate)} 已核验本地存档；历史页不会使用最新交易日数据回填。`
+        : '实时接口暂不可用，当前展示最近一次已核验的本地存档。',
+    },
+  }
+}
+
+function buildSectorFlowNavigation(
+  db: Database.Database,
+  selectedTradeDate: string | null,
+): SectorFlowWorkbenchSnapshot['navigation'] {
+  const storedDates = listVerifiedObservationDates(db)
+  const allDates = selectedTradeDate
+    ? Array.from(new Set([...storedDates, selectedTradeDate])).sort()
+    : storedDates
+  const selectedIndex = selectedTradeDate ? allDates.indexOf(selectedTradeDate) : -1
+  return {
+    selectedTradeDate,
+    previousTradeDate: selectedIndex > 0 ? allDates[selectedIndex - 1] : null,
+    nextTradeDate: selectedIndex >= 0 && selectedIndex < allDates.length - 1
+      ? allDates[selectedIndex + 1]
+      : null,
+    latestTradeDate: allDates.at(-1) ?? null,
   }
 }
 
@@ -432,8 +494,8 @@ function compactDateToTimestamp(value: string): number {
   return Date.UTC(year, month - 1, day, 12 - 8)
 }
 
-function compactDateToIso(value: string): string {
-  return new Date(compactDateToTimestamp(value)).toISOString()
+function formatCompactTradeDate(value: string): string {
+  return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`
 }
 
 function scopeLabel(scope: SectorFlowScope): string {
