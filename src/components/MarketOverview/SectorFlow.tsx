@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isInTradingHours } from '../../utils/tradingHours'
+import {
+  getBeijingDateValue,
+  ResearchDatePicker,
+} from '../IndustryResearch/ResearchDecisionControls'
 
 type MetricMode = 'verified_flow' | 'turnover_strength'
 type Scope = 'concept' | 'industry'
@@ -75,11 +79,21 @@ interface FlowSnapshot {
     archived: boolean
     message: string
   }
+  navigation: {
+    selectedTradeDate: string | null
+    previousTradeDate: string | null
+    nextTradeDate: string | null
+    latestTradeDate: string | null
+  }
 }
 
 type DirectionFilter = 'all' | 'positive' | 'risk'
 type ScopeFilter = 'all' | Scope
 type SortKey = 'mainFlow' | 'flowRate' | 'change' | 'amount'
+interface SnapshotRequest {
+  forceRefresh?: boolean
+  tradeDate?: string | null
+}
 
 const STATE_LABEL: Record<ThemeState, string> = {
   continuation: '延续',
@@ -103,34 +117,58 @@ export function SectorFlow() {
   const [directionFilter, setDirectionFilter] = useState<DirectionFilter>('all')
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>('all')
   const [sortKey, setSortKey] = useState<SortKey>('mainFlow')
+  const [datePickerRevision, setDatePickerRevision] = useState(0)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const requestSequenceRef = useRef(0)
+  const retryRequestRef = useRef<SnapshotRequest>({ forceRefresh: true })
+  const workbenchRef = useRef<HTMLDivElement | null>(null)
 
-  const loadSnapshot = useCallback(async (forceRefresh = false) => {
+  const loadSnapshot = useCallback(async (request: SnapshotRequest = {}) => {
+    const requestSequence = requestSequenceRef.current + 1
+    requestSequenceRef.current = requestSequence
+    retryRequestRef.current = { ...request, forceRefresh: true }
     setLoading(true)
     setError('')
     try {
-      const response = await window.api.sectorFlow.getSnapshot(forceRefresh)
-      if (response.ok) setSnapshot(response.snapshot as FlowSnapshot)
-      else setError(response.message ?? '板块资金加载失败，请稍后重试。')
+      const response = await window.api.sectorFlow.getSnapshot(request)
+      if (requestSequence !== requestSequenceRef.current) return
+      if (response.ok) {
+        setSnapshot(response.snapshot as FlowSnapshot)
+        if (request.tradeDate) workbenchRef.current?.scrollTo({ top: 0, behavior: 'auto' })
+      } else {
+        setError(response.message ?? '板块资金加载失败，请稍后重试。')
+        setDatePickerRevision((current) => current + 1)
+      }
     } catch {
+      if (requestSequence !== requestSequenceRef.current) return
       setError('板块资金加载失败，请检查网络后重试。')
+      setDatePickerRevision((current) => current + 1)
     } finally {
-      setLoading(false)
+      if (requestSequence === requestSequenceRef.current) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    void loadSnapshot(false)
+    void loadSnapshot()
   }, [loadSnapshot])
 
+  const selectedTradeDate = snapshot?.navigation.selectedTradeDate ?? null
+  const latestTradeDate = snapshot?.navigation.latestTradeDate ?? null
+  const isHistoricalView = Boolean(
+    selectedTradeDate
+    && latestTradeDate
+    && selectedTradeDate !== latestTradeDate,
+  )
+
   useEffect(() => {
+    if (isHistoricalView) return
     timerRef.current = setInterval(() => {
-      if (isInTradingHours()) void loadSnapshot(false)
+      if (isInTradingHours()) void loadSnapshot()
     }, 60_000)
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
     }
-  }, [loadSnapshot])
+  }, [isHistoricalView, loadSnapshot])
 
   const tableItems = useMemo(() => {
     if (!snapshot) return []
@@ -151,30 +189,106 @@ export function SectorFlow() {
 
   return (
     <div
+      ref={workbenchRef}
       className="h-full w-full overflow-y-auto overflow-x-hidden bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100"
       aria-busy={loading}
       data-testid="sector-flow-workbench"
     >
       <header className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 px-4 py-3 backdrop-blur dark:border-gray-800 dark:bg-gray-950/95">
-        <div className="flex min-w-0 flex-wrap items-center gap-3">
+        <div className="flex min-w-0 flex-wrap items-end justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-sm font-semibold">板块资金与明早竞价</h2>
+              <h2 className="text-sm font-semibold">{isHistoricalView ? '板块资金与次日竞价' : '板块资金与明早竞价'}</h2>
               {snapshot && <SourceBadge snapshot={snapshot} />}
             </div>
             <p className="mt-1 truncate text-xs text-gray-500 dark:text-gray-400">
               {snapshot ? `${snapshot.sourceLabel} · ${formatTradeDate(snapshot.tradeDate)} · ${formatUpdateTime(snapshot.updatedAt)}` : '正在读取板块资金事实'}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void loadSnapshot(true)}
-            disabled={loading}
-            className="inline-flex min-h-11 items-center gap-2 rounded-md border border-gray-300 bg-white px-3 text-xs font-medium text-gray-700 transition-colors hover:border-blue-400 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-blue-500 dark:hover:bg-blue-950/40"
-          >
-            <RefreshIcon spinning={loading} />
-            {loading ? '更新中' : '刷新资金'}
-          </button>
+          {snapshot && selectedTradeDate && latestTradeDate && (
+            <div
+              data-testid="sector-flow-date-navigation"
+              className="flex flex-wrap items-end justify-end gap-2"
+              aria-label="板块资金交易日选择"
+            >
+              <button
+                type="button"
+                disabled={loading || !snapshot.navigation.previousTradeDate}
+                onClick={() => {
+                  const previous = snapshot.navigation.previousTradeDate
+                  if (previous) void loadSnapshot({ tradeDate: previous })
+                }}
+                className="min-h-11 rounded-md border border-gray-300 bg-white px-3 text-xs font-medium text-gray-700 transition-colors motion-reduce:transition-none hover:border-blue-400 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-blue-500 dark:hover:bg-blue-950/40"
+                aria-label="板块资金前一交易日"
+                title={snapshot.navigation.previousTradeDate ? `前一交易日 ${formatTradeDate(snapshot.navigation.previousTradeDate)}` : '没有更早的板块资金存档'}
+              >
+                ← 上一交易日
+              </button>
+              <div className="w-[188px]">
+                <ResearchDatePicker
+                  key={`${selectedTradeDate}:${datePickerRevision}`}
+                  value={formatTradeDate(selectedTradeDate)}
+                  max={formatTradeDate(latestTradeDate) || getBeijingDateValue()}
+                  disabled={loading}
+                  testId="sector-flow-date-picker"
+                  ariaLabel="板块资金交易日，格式为年-月-日"
+                  triggerAriaLabel="打开板块资金交易日选择器"
+                  dialogLabel="选择板块资金交易日"
+                  footerHint="仅回看已经保存在本地的真实板块资金"
+                  controlClassName="h-11"
+                  onChange={() => {
+                    // 仅在确认提交时切换，避免输入过程中频繁查询。
+                  }}
+                  onCommit={(next) => {
+                    const compact = toCompactTradeDate(next)
+                    if (!compact || compact === selectedTradeDate) return
+                    if (compact === latestTradeDate) {
+                      void loadSnapshot()
+                      return
+                    }
+                    void loadSnapshot({ tradeDate: compact })
+                  }}
+                />
+              </div>
+              <button
+                type="button"
+                disabled={loading || !snapshot.navigation.nextTradeDate}
+                onClick={() => {
+                  const next = snapshot.navigation.nextTradeDate
+                  if (!next) return
+                  if (next === latestTradeDate) void loadSnapshot()
+                  else void loadSnapshot({ tradeDate: next })
+                }}
+                className="min-h-11 rounded-md border border-gray-300 bg-white px-3 text-xs font-medium text-gray-700 transition-colors motion-reduce:transition-none hover:border-blue-400 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-blue-500 dark:hover:bg-blue-950/40"
+                aria-label="板块资金后一交易日"
+                title={snapshot.navigation.nextTradeDate ? `后一交易日 ${formatTradeDate(snapshot.navigation.nextTradeDate)}` : '已经是最新板块资金存档'}
+              >
+                下一交易日 →
+              </button>
+              {isHistoricalView && (
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={() => { void loadSnapshot() }}
+                  className="min-h-11 px-2 text-xs font-medium text-blue-700 transition-colors motion-reduce:transition-none hover:text-blue-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-wait disabled:opacity-50 dark:text-blue-300 dark:hover:text-blue-100"
+                >
+                  回到最新
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void loadSnapshot({
+                  ...(isHistoricalView ? { tradeDate: selectedTradeDate } : {}),
+                  forceRefresh: true,
+                })}
+                disabled={loading}
+                className="inline-flex min-h-11 items-center gap-2 rounded-md border border-gray-300 bg-white px-3 text-xs font-medium text-gray-700 transition-colors motion-reduce:transition-none hover:border-blue-400 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-blue-500 dark:hover:bg-blue-950/40"
+              >
+                <RefreshIcon spinning={loading} />
+                {loading ? '读取中' : (isHistoricalView ? '重新读取' : '刷新资金')}
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -183,14 +297,14 @@ export function SectorFlow() {
           <div className="border-b border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span>{error}</span>
-              <button type="button" onClick={() => void loadSnapshot(true)} className="min-h-11 px-3 font-medium underline underline-offset-4">重新加载</button>
+              <button type="button" onClick={() => void loadSnapshot(retryRequestRef.current)} className="min-h-11 px-3 font-medium underline underline-offset-4">重新加载</button>
             </div>
           </div>
         )}
       </div>
 
       {loading && !snapshot && <LoadingState />}
-      {!loading && snapshot?.dataMode === 'empty' && <EmptyState onRetry={() => void loadSnapshot(true)} />}
+      {!loading && snapshot?.dataMode === 'empty' && <EmptyState onRetry={() => void loadSnapshot({ forceRefresh: true })} />}
 
       {snapshot && snapshot.dataMode !== 'empty' && (
         <main>
@@ -199,7 +313,7 @@ export function SectorFlow() {
               <div className="max-w-4xl">
                 <div className="flex items-center gap-2">
                   <TargetIcon />
-                  <h3 className="text-sm font-semibold">明早竞价观察</h3>
+                  <h3 className="text-sm font-semibold">{isHistoricalView ? '次日竞价观察' : '明早竞价观察'}</h3>
                   <span className={stanceClass(snapshot.guidance.stance)}>{STANCE_LABEL[snapshot.guidance.stance]}</span>
                 </div>
                 <p className="mt-2 text-sm leading-6 text-gray-700 dark:text-gray-300">{snapshot.guidance.summary}</p>
@@ -279,8 +393,13 @@ export function SectorFlow() {
 }
 
 function SourceBadge({ snapshot }: { snapshot: FlowSnapshot }) {
+  const historical = Boolean(
+    snapshot.navigation.selectedTradeDate
+    && snapshot.navigation.latestTradeDate
+    && snapshot.navigation.selectedTradeDate !== snapshot.navigation.latestTradeDate,
+  )
   const label = snapshot.metricMode === 'verified_flow'
-    ? snapshot.dataMode === 'realtime' ? '真实资金 · 盘中' : '真实资金 · 盘后'
+    ? historical ? '真实资金 · 历史复盘' : snapshot.dataMode === 'realtime' ? '真实资金 · 盘中' : '真实资金 · 盘后'
     : '降级 · 成交方向强度'
   return (
     <span className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium ${snapshot.metricMode === 'verified_flow' ? 'bg-cyan-100 text-cyan-800 dark:bg-cyan-950 dark:text-cyan-200' : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200'}`}>
@@ -479,6 +598,11 @@ function formatPercent(value: number | null): string {
 function formatTradeDate(value: string | null): string {
   if (!value || value.length !== 8) return '日期未知'
   return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`
+}
+
+function toCompactTradeDate(value: string): string | null {
+  const compact = value.replaceAll('-', '')
+  return /^\d{8}$/.test(compact) ? compact : null
 }
 
 function formatUpdateTime(value: string): string {

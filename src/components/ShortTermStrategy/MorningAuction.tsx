@@ -27,6 +27,12 @@ import {
   type MorningAuctionRecoveryIssue,
   type MorningAuctionTradeDateStatus,
 } from './morningAuctionRecoveryModel'
+import {
+  formatMorningAuctionPriceHistoryCoverage,
+  getMorningAuctionPriceHistoryMissingDisplay,
+  type MorningAuctionPriceHistoryCoverage,
+  type MorningAuctionPriceHistoryStatus,
+} from './morningAuctionPriceHistoryViewModel'
 
 /** 返回当前北京时间 YYYYMMDD */
 function todayYmd(): string {
@@ -63,6 +69,7 @@ interface MorningAuctionStock {
   currentAmount: number | null
   pctChg3d: number | null
   pctChg5d: number | null
+  priceHistory?: MorningAuctionPriceHistoryStatus
   conceptNames: string[]
   themeAttribution?: MorningAuctionThemeAttribution | null
 }
@@ -104,6 +111,7 @@ interface MorningAuctionSnapshot {
     n: BoardCategoryStock[]
   }
   marketThemes?: MorningAuctionMarketThemeSummary
+  priceHistoryCoverage?: MorningAuctionPriceHistoryCoverage
 }
 
 type VerificationStatus = 'pending' | 'checked' | 'blocked' | 'not_applicable'
@@ -298,6 +306,20 @@ function formatSignedPct(value: number | null): string {
 
 function formatScore(score: number): string {
   return Math.max(0, Math.min(100, score)).toFixed(0)
+}
+
+function PriceHistoryCell({ stock, days }: { stock: MorningAuctionStock; days: 3 | 5 }): JSX.Element {
+  const value = days === 3 ? stock.pctChg3d : stock.pctChg5d
+  if (value != null) {
+    return <span className={pctColor(value)}>{formatSignedPct(value)}</span>
+  }
+  const missing = getMorningAuctionPriceHistoryMissingDisplay(stock.priceHistory, days)
+  const className = missing.tone === 'danger'
+    ? 'text-red-600 dark:text-red-400'
+    : missing.tone === 'warning'
+      ? 'text-amber-600 dark:text-amber-400'
+      : 'text-slate-500 dark:text-slate-400'
+  return <span className={`whitespace-nowrap text-[10px] font-medium ${className}`} title={missing.title}>{missing.label}</span>
 }
 
 function formatFlowAmount(yuan: number | null): string {
@@ -841,6 +863,7 @@ function CandidateQueue({
   selectedName,
   chipSyncAttemptedCodes,
   chipSyncing,
+  priceHistoryCoverage,
   onSelect,
   onStockClick,
 }: {
@@ -850,6 +873,7 @@ function CandidateQueue({
   selectedName: string | null
   chipSyncAttemptedCodes: Set<string>
   chipSyncing: boolean
+  priceHistoryCoverage?: MorningAuctionPriceHistoryCoverage
   onSelect: (candidate: AuctionCandidate) => void
   onStockClick: (stock: MorningAuctionStock) => void
 }): JSX.Element {
@@ -865,7 +889,19 @@ function CandidateQueue({
     <div className="flex min-h-[220px] flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] max-xl:h-[560px] xl:max-h-[calc(100vh-430px)] dark:border-slate-700 dark:bg-slate-800">
       <div className="flex shrink-0 items-center gap-2 border-b border-slate-100 bg-gradient-to-b from-white to-slate-50 px-3.5 py-3 dark:border-slate-700 dark:from-slate-800 dark:to-slate-800/70">
         <h3 className="m-0 text-[15px] font-bold text-slate-950 dark:text-slate-50">{title}</h3>
-        <span className="text-xs text-slate-500 dark:text-slate-400">{candidates.length} 只股票 · 当前选中 {selectedName ?? '暂无'} · 表格保留高密度, 证据收纳到右侧研判</span>
+        <span className="min-w-0 truncate text-xs text-slate-500 dark:text-slate-400">{candidates.length} 只股票 · 当前选中 {selectedName ?? '暂无'}</span>
+        {priceHistoryCoverage && priceHistoryCoverage.requestedCount > 0 && (
+          <span
+            data-testid="morning-auction-price-history-coverage"
+            role="status"
+            className={`ml-auto shrink-0 rounded border px-2 py-1 text-[10px] font-semibold tabular-nums ${priceHistoryCoverage.covered5dCount === priceHistoryCoverage.requestedCount
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/35 dark:text-emerald-300'
+              : 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/35 dark:text-amber-300'}`}
+            title={`完整 ${priceHistoryCoverage.readyCount}，部分 ${priceHistoryCoverage.partialCount}，样本不足 ${priceHistoryCoverage.insufficientCount}，暂无数据 ${priceHistoryCoverage.unavailableCount}，失败 ${priceHistoryCoverage.failedCount}`}
+          >
+            {formatMorningAuctionPriceHistoryCoverage(priceHistoryCoverage)}
+          </span>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
         <table className="w-full min-w-[1120px] border-separate border-spacing-0 text-xs">
@@ -916,8 +952,8 @@ function CandidateQueue({
                   <td className="h-[42px] border-b border-slate-100 bg-white px-2.5 text-right tabular-nums text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">{stock.currentPrice != null ? stock.currentPrice.toFixed(2) : '—'}</td>
                   <td className={`h-[42px] border-b border-slate-100 bg-white px-2.5 text-right font-semibold tabular-nums dark:border-slate-700 dark:bg-slate-800 ${stock.currentPctChg != null ? pctColor(stock.currentPctChg) : 'text-slate-400'}`}>{formatSignedPct(stock.currentPctChg)}</td>
                   <td className="h-[42px] border-b border-slate-100 bg-white px-2.5 text-right tabular-nums text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">{stock.currentAmount != null ? formatAmount(stock.currentAmount / 10000) : '—'}</td>
-                  <td className={`h-[42px] border-b border-slate-100 bg-white px-2.5 text-right font-semibold tabular-nums dark:border-slate-700 dark:bg-slate-800 ${stock.pctChg3d != null ? pctColor(stock.pctChg3d) : 'text-slate-400'}`}>{formatSignedPct(stock.pctChg3d)}</td>
-                  <td className={`h-[42px] border-b border-slate-100 bg-white px-2.5 text-right font-semibold tabular-nums dark:border-slate-700 dark:bg-slate-800 ${stock.pctChg5d != null ? pctColor(stock.pctChg5d) : 'text-slate-400'}`}>{formatSignedPct(stock.pctChg5d)}</td>
+                  <td className="h-[42px] border-b border-slate-100 bg-white px-2.5 text-right font-semibold tabular-nums dark:border-slate-700 dark:bg-slate-800"><PriceHistoryCell stock={stock} days={3} /></td>
+                  <td className="h-[42px] border-b border-slate-100 bg-white px-2.5 text-right font-semibold tabular-nums dark:border-slate-700 dark:bg-slate-800"><PriceHistoryCell stock={stock} days={5} /></td>
                   <td className="h-[42px] border-b border-slate-100 bg-white px-2.5 text-right dark:border-slate-700 dark:bg-slate-800">
                     <ThemeAttributionCell candidate={candidate} onSelect={onSelect} />
                   </td>
@@ -1450,11 +1486,11 @@ export function MorningAuction({ dataTools, onOpenDataTools }: MorningAuctionPro
     void loadSnapshot(false, selectedDate)
   }, [loadSnapshot, selectedDate])
 
-  // FR-134: 若 3d/5d 数据尚未就绪（后端异步填充中），5s 后自动二次拉取
+  // 题材仍为异步填充，缺失时 5 秒后自动读取一次更新后的内存快照。
   useEffect(() => {
     if (!snapshot) return
     const allPools = collectSnapshotStocks(snapshot)
-    const hasMissing = allPools.length > 0 && allPools.some(s => s.pctChg3d === null || s.pctChg5d === null || s.conceptNames.length === 0)
+    const hasMissing = allPools.length > 0 && allPools.some(s => s.conceptNames.length === 0)
     if (!hasMissing) return
     const timer = setTimeout(() => void loadSnapshot(false, snapshot.tradeDate), 5000)
     return () => clearTimeout(timer)
@@ -1875,6 +1911,7 @@ export function MorningAuction({ dataTools, onOpenDataTools }: MorningAuctionPro
             selectedName={selectedCandidate?.stock.stockName ?? null}
             chipSyncAttemptedCodes={chipSyncAttemptedCodes}
             chipSyncing={chipSyncing}
+            priceHistoryCoverage={snapshot?.priceHistoryCoverage}
             onSelect={(candidate) => setSelectedCandidateId(candidate.id)}
             onStockClick={handleStockClick}
           />

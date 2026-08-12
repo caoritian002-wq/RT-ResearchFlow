@@ -4,8 +4,10 @@ import { runMigrations } from '../../electron/main/database/db'
 import {
   getLatestVerifiedObservationDateBefore,
   getPreviousVerifiedFlowMap,
+  getVerifiedObservationMetadata,
   getVerifiedFlowsByBoardNames,
   listSectorFlowObservations,
+  listVerifiedObservationDates,
   upsertSectorFlowObservations,
 } from '../../electron/main/database/sectorFlowObservationRepository'
 import type { SectorFlowItem } from '../../electron/main/services/sectorFlowTypes'
@@ -44,6 +46,13 @@ describe('FR-243 板块资金观察仓库', () => {
       expect(getPreviousVerifiedFlowMap(db, '20260723').get('concept:BK1000')).toBe(300_000_000)
       expect(getLatestVerifiedObservationDateBefore(db, '20260723')).toBe('20260722')
       expect(getLatestVerifiedObservationDateBefore(db, '20260724')).toBe('20260723')
+      expect(listVerifiedObservationDates(db)).toEqual(['20260722', '20260723', '20260724'])
+      expect(getVerifiedObservationMetadata(db, '20260723')).toEqual({
+        capturedAt: 3,
+        sourceUpdatedAt: 1_784_792_372_000,
+        itemCount: 1,
+      })
+      expect(getVerifiedObservationMetadata(db, '20260725')).toBeNull()
       const latestFlows = getVerifiedFlowsByBoardNames(db, ['未来资金'])
       expect(latestFlows[0]).toMatchObject({
         boardName: '未来资金', mainNetInflow: 700_000_000, tradeDate: '20260724',

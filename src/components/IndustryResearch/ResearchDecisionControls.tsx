@@ -28,6 +28,7 @@ export interface ResearchDatePickerProps {
   dialogLabel?: string
   footerHint?: string
   quickSelectLabel?: string
+  controlClassName?: string
   onChange: (value: string) => void
   onCommit?: (value: string) => void
 }
@@ -252,6 +253,7 @@ export function ResearchDatePicker({
   dialogLabel = '选择估值请求日',
   footerHint = '数据按该日及此前可用交易日计算',
   quickSelectLabel = '今天',
+  controlClassName = 'h-10',
   onChange,
   onCommit,
 }: ResearchDatePickerProps): React.ReactElement {
@@ -312,7 +314,7 @@ export function ResearchDatePicker({
 
   return (
     <div ref={rootRef} className="relative min-w-0">
-      <div className="flex h-10 items-center rounded-md border border-slate-300 bg-white shadow-sm shadow-slate-200/30 transition-colors duration-150 focus-within:border-cyan-500 focus-within:ring-2 focus-within:ring-cyan-500/20 hover:border-cyan-400 dark:border-slate-700 dark:bg-slate-950 dark:shadow-none dark:hover:border-cyan-600">
+      <div className={`flex ${controlClassName} items-center rounded-md border border-slate-300 bg-white shadow-sm shadow-slate-200/30 transition-colors duration-150 focus-within:border-cyan-500 focus-within:ring-2 focus-within:ring-cyan-500/20 hover:border-cyan-400 dark:border-slate-700 dark:bg-slate-950 dark:shadow-none dark:hover:border-cyan-600`}>
         <input
           data-testid={testId}
           value={draft}

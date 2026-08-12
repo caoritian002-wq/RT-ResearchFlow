@@ -87,3 +87,14 @@ export interface SectorFlowSnapshot {
     message: string
   }
 }
+
+export interface SectorFlowNavigation {
+  selectedTradeDate: string | null
+  previousTradeDate: string | null
+  nextTradeDate: string | null
+  latestTradeDate: string | null
+}
+
+export type SectorFlowWorkbenchSnapshot = SectorFlowSnapshot & {
+  navigation: SectorFlowNavigation
+}

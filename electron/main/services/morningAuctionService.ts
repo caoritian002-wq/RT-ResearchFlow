@@ -40,6 +40,12 @@ import {
   type MorningAuctionDirectThemeFact,
 } from './morningAuctionThemeAttributionModel'
 import { buildMorningAuctionMarketThemes } from './morningAuctionMarketThemeModel'
+import {
+  MorningAuctionPriceHistoryCoordinator,
+  loadMorningAuctionPriceHistoryEntries,
+  type MorningAuctionPriceHistoryCoverage,
+  type MorningAuctionPriceHistoryEntry,
+} from './morningAuctionPriceHistoryCoordinator'
 
 export interface MorningAuctionStock {
   /** Tushare 风格代码: 000001.SZ / 600519.SH / 300750.SZ */
@@ -64,10 +70,12 @@ export interface MorningAuctionStock {
   currentPctChg: number | null
   /** 当日累计成交额（元），来自 sharedRtKCache；数据不可用时为 null */
   currentAmount: number | null
-  /** 近 3 个交易日累计涨跌幅（%），异步填充；未就绪时为 null */
+  /** 近 3 个交易日累计涨跌幅（%）；样本不足或读取失败时为 null */
   pctChg3d: number | null
-  /** 近 5 个交易日累计涨跌幅（%），异步填充；未就绪时为 null */
+  /** 近 5 个交易日累计涨跌幅（%）；样本不足或读取失败时为 null */
   pctChg5d: number | null
+  /** 历史涨跌事实的覆盖状态与稳定缺失原因。 */
+  priceHistory?: Omit<MorningAuctionPriceHistoryEntry, 'p3d' | 'p5d'>
   /** 题材列表（按热度降序），异步填充；未就绪时为空数组 */
   conceptNames: string[]
   /** 早盘题材归因。直接原因、竞价共振和静态关联保持分层，不把普通成分关系冒充主炒题材。 */
@@ -122,6 +130,8 @@ export interface MorningAuctionSnapshot {
   }
   /** 当前竞价候选反向聚合的市场主线及上一交易日真实板块资金双确认。 */
   marketThemes?: MorningAuctionMarketThemeSummary
+  /** 当前候选去重后的 3 日/5 日涨跌覆盖摘要。 */
+  priceHistoryCoverage?: MorningAuctionPriceHistoryCoverage
 }
 
 export interface MorningAuctionTradeDateStatus {
@@ -169,6 +179,17 @@ function createEmptyMorningAuctionSnapshot(tradeDate: string): MorningAuctionSna
     weakToStrong: { badBoard: [], tailAttack: [], brokenBoard: [], afternoonReseal: [], reversal: [] },
     boardCategory: { first: [], second: [], third: [], n: [] },
     marketThemes: buildMorningAuctionMarketThemes([], [], null),
+    priceHistoryCoverage: {
+      requestedCount: 0,
+      covered3dCount: 0,
+      covered5dCount: 0,
+      readyCount: 0,
+      partialCount: 0,
+      insufficientCount: 0,
+      unavailableCount: 0,
+      failedCount: 0,
+      updatedAt: Date.now(),
+    },
   }
 }
 
@@ -684,141 +705,63 @@ async function mergeConceptData(snap: MorningAuctionSnapshot, tradeDate: string)
   }
 }
 
-// ===== FR-134: N 日涨跌风险列 =====
-interface HistoryEntry { p3d: number | null; p5d: number | null }
-let _historyCache: { tradeDate: string; data: Map<string, HistoryEntry> } | null = null
-let _historyFetchPromise: Promise<void> | null = null
-
-/** 计算 YYYYMMDD 向前 N 个日历日 */
-function subtractCalendarDays(ymd: string, days: number): string {
-  const d = new Date(
-    parseInt(ymd.slice(0, 4), 10),
-    parseInt(ymd.slice(4, 6), 10) - 1,
-    parseInt(ymd.slice(6, 8), 10)
-  )
-  d.setDate(d.getDate() - days)
-  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
-}
-
-/** 从 _historyCache 将已计算的 3d/5d 数据 apply 到 snap 的所有池 */
-function applyHistoryToSnap(snap: MorningAuctionSnapshot, data: Map<string, HistoryEntry>): void {
-  const pools: MorningAuctionStock[][] = [
-    snap.threeOne.firstBoard, snap.threeOne.secondBoard,
-    snap.threeOne.brokenBoard, snap.threeOne.brokenConsec,
-    snap.threeOne.allMarket,
-    snap.weakToStrong.badBoard, snap.weakToStrong.tailAttack,
-    snap.weakToStrong.brokenBoard, snap.weakToStrong.afternoonReseal,
-    snap.weakToStrong.reversal,
-    snap.boardCategory.first, snap.boardCategory.second,
-    snap.boardCategory.third, snap.boardCategory.n
-  ]
-  for (const pool of pools) {
-    for (const s of pool) {
-      const entry = data.get(s.tsCode)
-      if (entry) {
-        s.pctChg3d = entry.p3d
-        s.pctChg5d = entry.p5d
-      }
-    }
+// ===== FR-134/266: N 日涨跌风险列与增量完整性 =====
+const priceHistoryCoordinator = new MorningAuctionPriceHistoryCoordinator(async (tradeDate, tsCodes) => {
+  const db = getDb()
+  let token: string | null = null
+  try {
+    const config = getDataSourceConfig(db)
+    token = config.tushareEnabled && config.tushareTokenEncrypted
+      ? decryptApiKey(config.tushareTokenEncrypted)
+      : null
+  } catch {
+    token = null
   }
-}
-
-/**
- * 异步填充 3/5 日涨跌数据（fire-and-forget）。
- * 完成后直接更新 cachedSnapshot（in-place），前端二次 get() 即可拿到数据。
- */
-async function mergePriceHistory(snap: MorningAuctionSnapshot, tradeDate: string): Promise<void> {
-  // 已有内存缓存直接 apply（同一次启动内）
-  if (_historyCache && _historyCache.tradeDate === tradeDate) {
-    applyHistoryToSnap(snap, _historyCache.data)
-    return
-  }
-  // 防并发：等待已有 in-flight Promise（而非直接 return），确保数据一定被 apply
-  if (_historyFetchPromise !== null) {
-    await _historyFetchPromise
-    // in-flight 完成后缓存已写入，直接 apply
-    if (_historyCache && _historyCache.tradeDate === tradeDate) {
-      applyHistoryToSnap(snap, _historyCache.data)
-    }
-    return
-  }
-
-  // 启动新的 fetch，记录 Promise 供并发调用方等待
-  _historyFetchPromise = (async () => {
-    try {
-      const db = getDb()
-
-      // 收集全部候选 tsCode（去重）
-      const allPools: MorningAuctionStock[][] = [
-        snap.threeOne.firstBoard, snap.threeOne.secondBoard,
-        snap.threeOne.brokenBoard, snap.threeOne.brokenConsec,
-        snap.threeOne.allMarket,
-        snap.weakToStrong.badBoard, snap.weakToStrong.tailAttack,
-        snap.weakToStrong.brokenBoard, snap.weakToStrong.afternoonReseal,
-        snap.weakToStrong.reversal,
-        snap.boardCategory.first, snap.boardCategory.second,
-        snap.boardCategory.third, snap.boardCategory.n
-      ]
-      const tsCodes = [...new Set(allPools.flat().map(s => s.tsCode))]
-      if (tsCodes.length === 0) return
-
-      // 60 个日历日 ≈ 40+ 个交易日（覆盖五一等长假后仍有足够历史），确保 DB ≥ 20 行阈值
-      const startDate = subtractCalendarDays(tradeDate, 60)
-
-      // FR-138: 先查 DB 缓存；行数不足 20 的股票才发起 API 请求
-      const cachedMap = queryDailyClose(db, tsCodes, startDate)
-      const missingCodes = tsCodes.filter(c => (cachedMap.get(c)?.length ?? 0) < 20)
-
-      // 合并 API 补拉数据到 cachedMap（显式传 end_date=tradeDate 确保 Tushare 返回完整历史范围）
-      if (missingCodes.length > 0) {
-        const cfg = getDataSourceConfig(db)
-        if (cfg.tushareEnabled && cfg.tushareTokenEncrypted) {
-          const token = decryptApiKey(cfg.tushareTokenEncrypted)
-          const apiRows = token
-            ? await fetchDailyForCandidates(token, missingCodes, startDate, tradeDate)
-            : []
-          if (apiRows.length > 0) {
-            upsertDailyClose(db, apiRows)
-            for (const r of apiRows) {
-              if (!cachedMap.has(r.tsCode)) cachedMap.set(r.tsCode, [])
-              cachedMap.get(r.tsCode)!.push(r)
-            }
-            // 补拉的数据需保证升序
-            for (const arr of cachedMap.values()) {
-              arr.sort((a, b) => a.tradeDate.localeCompare(b.tradeDate))
-            }
-          }
+  return loadMorningAuctionPriceHistoryEntries(tradeDate, tsCodes, {
+    queryLocal: (codes, startDate) => queryDailyClose(db, codes, startDate),
+    fetchRemote: token
+      ? async (tsCode, startDate, endDate) => {
+          const rows = await fetchDailyForCandidates(token, [tsCode], startDate, endDate)
+          if (rows.length > 0) upsertDailyClose(db, rows)
+          return rows
         }
-      }
+      : undefined,
+  })
+})
 
-      // 计算每只股票的 pctChg3d / pctChg5d
-      const resultMap = new Map<string, HistoryEntry>()
-      for (const [tsCode, arr] of cachedMap.entries()) {
-        // 找 tradeDate 位置（或最近一个 <= tradeDate 的位置）
-        let i = arr.length - 1
-        while (i >= 0 && arr[i].tradeDate > tradeDate) i--
-        if (i < 0) { resultMap.set(tsCode, { p3d: null, p5d: null }); continue }
-        const todayClose = arr[i].close
-        const p3d = i >= 3
-          ? (todayClose - arr[i - 3].close) / arr[i - 3].close * 100
-          : null
-        const p5d = i >= 5
-          ? (todayClose - arr[i - 5].close) / arr[i - 5].close * 100
-          : null
-        resultMap.set(tsCode, { p3d, p5d })
+function applyHistoryToSnap(
+  snap: MorningAuctionSnapshot,
+  data: Map<string, MorningAuctionPriceHistoryEntry>,
+): void {
+  for (const pool of getSnapshotPools(snap)) {
+    for (const stock of pool) {
+      const entry = data.get(stock.tsCode)
+      if (!entry) continue
+      stock.pctChg3d = entry.p3d
+      stock.pctChg5d = entry.p5d
+      stock.priceHistory = {
+        state: entry.state,
+        availableDays: entry.availableDays,
+        reason: entry.reason,
+        remoteAttempted: entry.remoteAttempted,
       }
-
-      _historyCache = { tradeDate, data: resultMap }
-      applyHistoryToSnap(snap, resultMap)
-    } catch (err) {
-      // 静默失败：3d/5d 保持 null，不影响页面渲染
-      console.error('[mergePriceHistory] failed, pctChg3d/5d will remain null:', err)
-    } finally {
-      _historyFetchPromise = null
     }
-  })()
+  }
+}
 
-  await _historyFetchPromise
+async function mergePriceHistory(
+  snap: MorningAuctionSnapshot,
+  tradeDate: string,
+  options: { retryUnresolved?: boolean } = {},
+): Promise<void> {
+  const tsCodes = [...new Set(getSnapshotPools(snap).flat().map(stock => stock.tsCode))]
+  if (tsCodes.length === 0) {
+    snap.priceHistoryCoverage = priceHistoryCoordinator.getCoverage(tradeDate, [])
+    return
+  }
+  const entries = await priceHistoryCoordinator.ensure(tradeDate, tsCodes, options)
+  applyHistoryToSnap(snap, entries)
+  snap.priceHistoryCoverage = priceHistoryCoordinator.getCoverage(tradeDate, tsCodes)
 }
 
 /**
@@ -999,32 +942,14 @@ export async function refreshMorningAuctionSnapshot(tradeDate: string): Promise<
     cachedSnapshot = createEmptyMorningAuctionSnapshot(tradeDate)
     return cachedSnapshot
   }
-  // allMarket 池的候选股来自 stk_auction 竞价快照，竞价窗口（09:25）结束后接口可能不再返回数据。
-  // 如果快照已存在且 allMarket 非空，说明竞价快照已固化，盘中刷新只需更新现价数据，不能重建。
-  // 其余三个池（firstBoard/secondBoard/brokenBoard/brokenConsec）来自 DB 历史数据，重建结果相同，无影响。
-  const allMarketAlreadyCaptured =
-    cachedSnapshot !== null &&
-    cachedSnapshot.tradeDate === tradeDate &&
-    cachedSnapshot.threeOne.allMarket.length > 0
-
-  if (allMarketAlreadyCaptured) {
-    // 仅刷新现价，保留竞价快照
-    mergeCurrentPrices(cachedSnapshot!)
-    await mergePriceHistory(cachedSnapshot!, tradeDate)
-    applyThemeAttributionToSnapshot(cachedSnapshot!)
-    emitMorningAuctionDecisionSignals(cachedSnapshot!)
-    void mergeConceptData(cachedSnapshot!, tradeDate)
-    return cachedSnapshot!
-  }
-
-  // 快照不存在或 allMarket 为空（竞价时段首次构建），完整重建
+  // 显式刷新和09:28确认均重新读取已固化竞价缓存，避免09:15早期候选池冻结。
+  // buildRealMorningAuctionSnapshot 会先装载 stk_auction_cache；远端为空或失败时不会抹掉本地快照。
   cachedSnapshot = await buildRealMorningAuctionSnapshot(tradeDate)
-  _historyCache = null  // 强制重新拉取
   _conceptCache = null  // 强制重新拉取题材
   mergeTodayClose(cachedSnapshot, tradeDate)
   mergeCurrentPrices(cachedSnapshot)
   // FR-134: 填充 3d/5d 数据后再返回，避免刷新后表格长期显示横线
-  await mergePriceHistory(cachedSnapshot, tradeDate)
+  await mergePriceHistory(cachedSnapshot, tradeDate, { retryUnresolved: true })
   applyThemeAttributionToSnapshot(cachedSnapshot)
   emitMorningAuctionDecisionSignals(cachedSnapshot)
   // 题材列异步填充
