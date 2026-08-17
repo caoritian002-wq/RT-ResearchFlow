@@ -7,7 +7,12 @@ import {
   upsertDailyClose,
 } from '../database/dailyCloseCacheRepository'
 import { getLastNTradingDays } from '../database/tradeCalRepository'
-import { fetchDailyBasicByDate, fetchDailyByDate } from './tushareService'
+import {
+  fetchDailyBasicByDate,
+  fetchDailyByDate,
+  getTushareAccessErrorCode,
+  type TushareAccessErrorCode,
+} from './tushareService'
 import { syncTradeCalFull, syncTradeCalIfNeeded } from './tradeCalSyncService'
 import { getLastSettledCalendarDate } from './marketSettlementPolicy'
 
@@ -26,7 +31,10 @@ export interface HistoricalDailySyncResult extends HistoricalDailyProgress {
   startDate: string | null
   endDate: string | null
   failedDates: string[]
+  turnoverSupplementWarning: HistoricalDailyTurnoverWarning | null
 }
+
+export type HistoricalDailyTurnoverWarning = TushareAccessErrorCode | 'TUSHARE_UPSTREAM_UNAVAILABLE'
 
 export interface HistoricalDailySyncOptions {
   tradeDayCount?: number
@@ -38,6 +46,7 @@ export interface HistoricalDailySyncOptions {
 
 export const HISTORICAL_DAILY_TARGET_TRADE_DAYS = 480
 const DEFAULT_COMPLETE_ROW_THRESHOLD = 4000
+const MAX_CONSECUTIVE_DATE_FAILURES = 3
 
 let syncRunning = false
 
@@ -52,6 +61,12 @@ function emitProgress(win: BrowserWindow | undefined, progress: HistoricalDailyP
 
 export function isHistoricalDailySyncRunning(): boolean {
   return syncRunning
+}
+
+function createHistoricalDailyError(code: string, message = code): Error & { code: string } {
+  const error = new Error(message) as Error & { code: string }
+  error.code = code
+  return error
 }
 
 export async function runHistoricalDailySync(
@@ -78,6 +93,8 @@ export async function runHistoricalDailySync(
     message: '准备同步全市场历史日线'
   }
   const failedDates: string[] = []
+  let consecutiveDateFailures = 0
+  let turnoverSupplementWarning: HistoricalDailyTurnoverWarning | null = null
 
   try {
     await syncTradeCalIfNeeded(db, token)
@@ -112,21 +129,38 @@ export async function runHistoricalDailySync(
       }
 
       let requested = false
+      let dateSucceeded = false
       try {
         if (existingRows >= completeRowThreshold) {
-          progress.message = `正在补齐 ${tradeDate} 的 ${missingTurnoverRows} 条换手率`
-          emitProgress(win, progress, options.onProgress)
-          requested = true
-          const basics = await fetchDailyBasicByDate(token, tradeDate)
-          const updated = backfillDailyCloseTurnover(db, basics)
-          progress.insertedRows += updated
-          if (updated >= missingTurnoverRows) {
-            progress.syncedTradeDays += 1
-            progress.message = `${tradeDate} 已补齐 ${updated} 条换手率`
+          if (turnoverSupplementWarning) {
+            progress.skippedTradeDays += 1
+            dateSucceeded = true
+            progress.message = `${tradeDate} 日线已可用，换手率补充已停止（${turnoverSupplementWarning}）`
           } else {
-            progress.failedTradeDays += 1
-            failedDates.push(tradeDate)
-            progress.message = `${tradeDate} 仅补齐 ${updated}/${missingTurnoverRows} 条换手率`
+            progress.message = `正在补齐 ${tradeDate} 的 ${missingTurnoverRows} 条换手率`
+            emitProgress(win, progress, options.onProgress)
+            requested = true
+            try {
+              const basics = await fetchDailyBasicByDate(token, tradeDate)
+              const updated = backfillDailyCloseTurnover(db, basics)
+              progress.insertedRows += updated
+              if (updated >= missingTurnoverRows) {
+                progress.syncedTradeDays += 1
+                dateSucceeded = true
+                progress.message = `${tradeDate} 已补齐 ${updated} 条换手率`
+              } else {
+                progress.failedTradeDays += 1
+                failedDates.push(tradeDate)
+                progress.message = `${tradeDate} 仅补齐 ${updated}/${missingTurnoverRows} 条换手率`
+              }
+            } catch (err) {
+              const warning = getTushareAccessErrorCode(err) ?? 'TUSHARE_UPSTREAM_UNAVAILABLE'
+              turnoverSupplementWarning = warning
+              progress.skippedTradeDays += 1
+              dateSucceeded = true
+              progress.message = `${tradeDate} 日线已可用，换手率补充已停止（${warning}）`
+              console.warn('[HistoricalDailySync] turnover supplement stopped:', warning)
+            }
           }
         } else {
           progress.message = `正在同步 ${tradeDate} 全市场日线`
@@ -139,33 +173,53 @@ export async function runHistoricalDailySync(
             progress.message = `${tradeDate} daily 返回 0 行`
           } else {
             let mergedRows = rows
-            try {
-              const basics = await fetchDailyBasicByDate(token, tradeDate)
-              if (basics.length > 0) {
-                const turnoverMap = new Map(basics.map((row) => [row.tsCode, row.turnoverRate]))
-                mergedRows = rows.map((row) => ({
-                  ...row,
-                  turnoverRate: turnoverMap.get(row.tsCode) ?? row.turnoverRate ?? null
-                }))
+            if (!turnoverSupplementWarning) {
+              try {
+                const basics = await fetchDailyBasicByDate(token, tradeDate)
+                if (basics.length > 0) {
+                  const turnoverMap = new Map(basics.map((row) => [row.tsCode, row.turnoverRate]))
+                  mergedRows = rows.map((row) => ({
+                    ...row,
+                    turnoverRate: turnoverMap.get(row.tsCode) ?? row.turnoverRate ?? null
+                  }))
+                }
+              } catch (err) {
+                turnoverSupplementWarning = getTushareAccessErrorCode(err) ?? 'TUSHARE_UPSTREAM_UNAVAILABLE'
+                console.warn('[HistoricalDailySync] daily_basic merge failed:', err instanceof Error ? err.message : String(err))
               }
-            } catch (err) {
-              console.warn('[HistoricalDailySync] daily_basic merge failed:', err instanceof Error ? err.message : String(err))
             }
 
-            upsertDailyClose(db, mergedRows)
+            upsertDailyClose(db, mergedRows, {
+              dataSource: 'tushare',
+              amountSource: 'tushare',
+              turnoverSource: 'tushare',
+              fetchedAt: Date.now(),
+            })
             progress.insertedRows += mergedRows.length
             progress.syncedTradeDays += 1
+            dateSucceeded = true
             progress.message = `${tradeDate} 写入 ${mergedRows.length} 条日线`
           }
         }
       } catch (err) {
         progress.failedTradeDays += 1
         failedDates.push(tradeDate)
-        progress.message = `${tradeDate} 同步失败: ${err instanceof Error ? err.message : String(err)}`
+        const accessCode = getTushareAccessErrorCode(err)
+        progress.message = accessCode
+          ? `${tradeDate} 同步已停止: ${accessCode}`
+          : `${tradeDate} 同步失败: ${err instanceof Error ? err.message : String(err)}`
         console.warn('[HistoricalDailySync] date failed:', tradeDate, err)
+        if (accessCode) throw createHistoricalDailyError(accessCode)
       } finally {
         progress.processedTradeDays += 1
         emitProgress(win, progress, options.onProgress)
+      }
+      consecutiveDateFailures = dateSucceeded ? 0 : consecutiveDateFailures + 1
+      if (consecutiveDateFailures >= MAX_CONSECUTIVE_DATE_FAILURES) {
+        throw createHistoricalDailyError(
+          'HISTORICAL_DAILY_UPSTREAM_UNAVAILABLE',
+          `连续 ${consecutiveDateFailures} 个交易日同步失败，已停止重复请求`,
+        )
       }
       if (requested && requestDelayMs > 0 && progress.processedTradeDays < progress.totalTradeDays) {
         await new Promise((resolve) => setTimeout(resolve, requestDelayMs))
@@ -173,16 +227,18 @@ export async function runHistoricalDailySync(
     }
 
     progress.currentTradeDate = null
+    const turnoverMessage = turnoverSupplementWarning ? `, 换手率补充已降级(${turnoverSupplementWarning})` : ''
     progress.message = failedDates.length > 0
-      ? `历史日线同步完成, ${failedDates.length} 个交易日失败, 可再次运行补齐`
-      : '历史日线同步完成'
+      ? `历史日线同步完成, ${failedDates.length} 个交易日失败, 可再次运行补齐${turnoverMessage}`
+      : `历史日线同步完成${turnoverMessage}`
     emitProgress(win, progress, options.onProgress)
 
     return {
       ...progress,
       startDate: tradeDays[0] ?? null,
       endDate: tradeDays[tradeDays.length - 1] ?? null,
-      failedDates
+      failedDates,
+      turnoverSupplementWarning,
     }
   } finally {
     syncRunning = false

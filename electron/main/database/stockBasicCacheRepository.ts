@@ -23,6 +23,22 @@ export interface StockBasicCacheFreshness {
   maxUpdatedAt: number | null
 }
 
+export interface PublicStockIdentityRow {
+  tsCode: string
+  name: string
+  market: '主板' | '创业板' | '科创板' | '北交所'
+  listStatus: 'L'
+  observedAt: number
+}
+
+export interface PublicStockIdentityMergeResult {
+  totalRows: number
+  insertedRows: number
+  updatedRows: number
+  preservedIndustryRows: number
+  preservedCircFloatRows: number
+}
+
 function fromDbRow(r: DbRow): StockBasicCacheRow {
   return {
     tsCode: r.ts_code,
@@ -115,6 +131,62 @@ export function searchStockBasicByKeyword(
 export function countAll(db: Database.Database): number {
   const row = db.prepare('SELECT COUNT(*) AS cnt FROM stock_basic_cache').get() as { cnt: number }
   return row?.cnt ?? 0
+}
+
+/**
+ * 合并公共证券身份。公共列表不具备行业、流通股本和可靠退市判定，
+ * 因此只更新明确存在的在市身份，不删除缺席代码，也不覆盖丰富字段。
+ */
+export function mergePublicStockIdentities(
+  db: Database.Database,
+  rows: PublicStockIdentityRow[],
+): PublicStockIdentityMergeResult {
+  if (rows.length === 0) {
+    return { totalRows: 0, insertedRows: 0, updatedRows: 0, preservedIndustryRows: 0, preservedCircFloatRows: 0 }
+  }
+  const existingStmt = db.prepare(`
+    SELECT industry, circ_float FROM stock_basic_cache WHERE ts_code = ?
+  `)
+  const mergeStmt = db.prepare(`
+    INSERT INTO stock_basic_cache (
+      ts_code, name, industry, market, list_status, circ_float, updated_at
+    ) VALUES (
+      @tsCode, @name, NULL, @market, 'L', NULL, @observedAt
+    )
+    ON CONFLICT(ts_code) DO UPDATE SET
+      name = excluded.name,
+      market = excluded.market,
+      list_status = 'L',
+      updated_at = excluded.updated_at
+  `)
+  const provenanceStmt = db.prepare(`
+    INSERT INTO stock_basic_identity_provenance (ts_code, data_source, observed_at)
+    VALUES (?, 'sina', ?)
+    ON CONFLICT(ts_code) DO UPDATE SET
+      data_source = 'sina',
+      observed_at = excluded.observed_at
+  `)
+  const write = db.transaction((items: PublicStockIdentityRow[]) => {
+    let insertedRows = 0
+    let updatedRows = 0
+    let preservedIndustryRows = 0
+    let preservedCircFloatRows = 0
+    for (const row of items) {
+      const existing = existingStmt.get(row.tsCode) as { industry: string | null; circ_float: number | null } | undefined
+      if (existing) {
+        updatedRows += 1
+        if (existing.industry != null) preservedIndustryRows += 1
+        if (existing.circ_float != null) preservedCircFloatRows += 1
+      } else {
+        insertedRows += 1
+      }
+      mergeStmt.run(row)
+      provenanceStmt.run(row.tsCode, row.observedAt)
+    }
+    return { insertedRows, updatedRows, preservedIndustryRows, preservedCircFloatRows }
+  })
+  const result = write(rows)
+  return { totalRows: rows.length, ...result }
 }
 
 export function getStockBasicCacheFreshness(db: Database.Database): StockBasicCacheFreshness {

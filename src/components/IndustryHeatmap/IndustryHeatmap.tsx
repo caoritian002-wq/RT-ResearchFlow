@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
-import { useAppStore } from "../../store/appStore";
+import { useAppStore, type HeatmapProvider } from "../../store/appStore";
+import { getBeijingDate } from "../../utils/heatmapMomentum";
 import { isInTradingHours } from "../../utils/tradingHours";
 
 // FR-096/FR-099/FR-100: 自研行业云图（ECharts treemap）
@@ -67,6 +68,173 @@ interface HeatmapStockLite {
 
 /** FR-113: 绘制规则类型与计算函数 */
 type DrawRule = "marketCap" | "absChange" | "gain" | "loss" | "equal";
+
+interface HeatmapToolbarOption<T extends string> {
+  value: T;
+  label: string;
+  disabled?: boolean;
+  disabledReason?: string;
+}
+
+const DRAW_RULE_OPTIONS: Array<HeatmapToolbarOption<DrawRule>> = [
+  { value: "marketCap", label: "市值/成交额" },
+  { value: "absChange", label: "涨跌幅强度" },
+  { value: "gain", label: "上涨强度" },
+  { value: "loss", label: "下跌强度" },
+  { value: "equal", label: "等权" },
+];
+
+function HeatmapToolbarSelect<T extends string>({
+  value,
+  options,
+  ariaLabel,
+  testId,
+  className,
+  onChange,
+  onOpen,
+}: {
+  value: T;
+  options: Array<HeatmapToolbarOption<T>>;
+  ariaLabel: string;
+  testId: string;
+  className: string;
+  onChange: (value: T) => void;
+  onOpen?: () => void;
+}) {
+  const listboxId = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
+  const selected = options[selectedIndex] ?? null;
+
+  const openMenu = useCallback(() => {
+    onOpen?.();
+    setActiveIndex(selectedIndex);
+    setOpen(true);
+  }, [onOpen, selectedIndex]);
+
+  const closeMenu = useCallback((restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) closeMenu();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeMenu(true);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, [closeMenu, open]);
+
+  const moveActive = (direction: 1 | -1) => {
+    setActiveIndex((current) => {
+      for (let offset = 1; offset <= options.length; offset += 1) {
+        const next = (current + direction * offset + options.length) % options.length;
+        if (!options[next]?.disabled) return next;
+      }
+      return current;
+    });
+  };
+
+  const choose = (option: HeatmapToolbarOption<T> | undefined) => {
+    if (!option || option.disabled) return;
+    onChange(option.value);
+    closeMenu(true);
+  };
+
+  return (
+    <div ref={rootRef} className={`relative flex-shrink-0 ${className}`}>
+      <button
+        ref={triggerRef}
+        type="button"
+        role="combobox"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={listboxId}
+        aria-activedescendant={open ? `${listboxId}-${activeIndex}` : undefined}
+        data-testid={`${testId}-trigger`}
+        title={ariaLabel}
+        onClick={() => {
+          if (open) closeMenu();
+          else openMenu();
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (!open) openMenu();
+            else moveActive(event.key === "ArrowDown" ? 1 : -1);
+          } else if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            if (!open) openMenu();
+            else choose(options[activeIndex]);
+          } else if (open && (event.key === "Home" || event.key === "End")) {
+            event.preventDefault();
+            const enabled = options
+              .map((option, index) => ({ option, index }))
+              .filter((item) => !item.option.disabled);
+            const target = event.key === "Home" ? enabled[0] : enabled.at(-1);
+            if (target) setActiveIndex(target.index);
+          }
+        }}
+        className="flex h-8 w-full items-center justify-between gap-2 rounded border border-gray-300 bg-white px-2.5 text-left text-sm text-gray-700 outline-none transition-colors hover:border-blue-400 focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/25 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:hover:border-blue-500"
+      >
+        <span className="min-w-0 truncate">{selected?.label ?? "请选择"}</span>
+        <span
+          aria-hidden="true"
+          className={`mr-0.5 h-2 w-2 flex-shrink-0 border-b border-r border-gray-400 transition-transform motion-reduce:transition-none ${open ? "-rotate-[135deg] translate-y-0.5" : "rotate-45 -translate-y-0.5"}`}
+        />
+      </button>
+      {open && (
+        <div
+          id={listboxId}
+          role="listbox"
+          aria-label={ariaLabel}
+          data-testid={`${testId}-listbox`}
+          className="absolute right-0 top-[calc(100%+4px)] z-50 w-max min-w-full overflow-hidden rounded border border-gray-200 bg-white p-1 shadow-xl shadow-black/15 dark:border-gray-600 dark:bg-gray-800 dark:shadow-black/40"
+        >
+          {options.map((option, index) => (
+            <button
+              id={`${listboxId}-${index}`}
+              key={option.value}
+              type="button"
+              role="option"
+              aria-selected={option.value === value}
+              aria-disabled={option.disabled || undefined}
+              disabled={option.disabled}
+              tabIndex={-1}
+              data-testid={`${testId}-option-${option.value}`}
+              title={option.disabledReason}
+              onMouseEnter={() => {
+                if (!option.disabled) setActiveIndex(index);
+              }}
+              onClick={() => choose(option)}
+              className={`flex h-9 w-full min-w-[136px] items-center justify-between gap-4 rounded-sm px-2.5 text-left text-sm outline-none transition-colors motion-reduce:transition-none ${option.disabled ? "cursor-not-allowed text-gray-300 dark:text-gray-600" : index === activeIndex ? "bg-blue-50 text-blue-700 dark:bg-blue-950/50 dark:text-blue-200" : "text-gray-700 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-gray-700"}`}
+            >
+              <span className="whitespace-nowrap">{option.label}</span>
+              {option.value === value && (
+                <span aria-hidden="true" className="text-blue-600 dark:text-blue-300">✓</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function computeValue(
   change: number,
@@ -158,9 +326,18 @@ export function IndustryHeatmap() {
       : isClosingMomentum(industryMomentumMeta?.capturedAt ?? 0)
         ? "收盘前"
         : "盘中";
+  const momentumStateLabel = !historicalMomentum
+    ? "盘中滚动"
+    : momentumBoundaryLabel === "午盘前"
+      ? "午盘前回放"
+      : momentumBoundaryLabel === "收盘前"
+        ? industryMomentumMeta?.tradeDate === getBeijingDate(clockNow)
+          ? "今日收盘前回放"
+          : "上个交易日收盘前回放"
+        : "上次盘中回放";
   const momentumContextLabel = historicalMomentum && industryMomentumMeta
-    ? `${formatMomentumCapturedAt(industryMomentumMeta.capturedAt).slice(0, 5)} ${momentumBoundaryLabel} ${momentumWindowMinutes}min 变化${historicalRecovery ? " · 历史分钟恢复" : ""}`
-    : `${momentumWindowMinutes}min 变化`;
+    ? `${momentumWindowMinutes}min 变化 · ${momentumStateLabel} · ${formatMomentumCapturedAt(industryMomentumMeta.capturedAt)}${historicalRecovery ? " · 历史分钟恢复" : ""}`
+    : `${momentumWindowMinutes}min 变化 · 盘中滚动`;
 
   const [momentumOpen, setMomentumOpen] = useState(true);
   const [hoveredIndustryName, setHoveredIndustryName] = useState<string | null>(
@@ -297,6 +474,34 @@ export function IndustryHeatmap() {
   const hoverConstituentsRef = useRef<Map<string, HeatmapStockLite[]>>(new Map());
   // 当前下钻行业 ref：供 snapshot 刷新 effect 读取（避免 stale closure）
   const drilledIndustryRef = useRef<string | null>(null);
+
+  const hideTreemapTooltip = useCallback(() => {
+    treemapHoverNameRef.current = null;
+    treemapMoveThrottleRef.current = 0;
+    cancelLoadConstituents();
+    for (const chartRef of [l1ChartRef, l2ChartRef]) {
+      try {
+        (chartRef.current as any)?.getEchartsInstance?.()?.dispatchAction({ type: "hideTip" });
+      } catch {
+        // 图表切换或销毁期间无需恢复已经离开的 tooltip。
+      }
+    }
+  }, [cancelLoadConstituents]);
+
+  const dismissLeaderboardTooltip = useCallback(() => {
+    if (hoverCloseTimer.current) {
+      clearTimeout(hoverCloseTimer.current);
+      hoverCloseTimer.current = null;
+    }
+    setHoveredIndustryName(null);
+    setHoverPos(null);
+    cancelLoadConstituents();
+  }, [cancelLoadConstituents]);
+
+  const dismissAllHover = useCallback(() => {
+    hideTreemapTooltip();
+    dismissLeaderboardTooltip();
+  }, [dismissLeaderboardTooltip, hideTreemapTooltip]);
 
   // FR-114: 懒加载完成后，若鼠标仍停留在该行业 treemap 节点上，复刷 tooltip 让 Top3 立刻显示
   useEffect(() => {
@@ -461,6 +666,7 @@ export function IndustryHeatmap() {
     return {
       tooltip: {
         ...tooltipBase(isDark),
+        className: "industry-heatmap-treemap-tooltip",
         formatter: (params: any) => {
           const meta = params.data?._meta;
           if (!meta) return params.name;
@@ -671,6 +877,7 @@ export function IndustryHeatmap() {
     return {
       tooltip: {
         ...tooltipBase(isDark),
+        className: "industry-heatmap-treemap-tooltip",
         formatter: (params: any) => {
           const meta = params.data?._meta;
           if (!meta) return params.name;
@@ -828,11 +1035,7 @@ export function IndustryHeatmap() {
   const hasTodayData = displayList.length > 0;
 
   const momentumN = momentumWindowMinutes;
-  const momentumTitle = historicalRecovery
-    ? `${momentumBoundaryLabel} ${momentumN}min 动量`
-    : historicalMomentum
-      ? `${industryMomentumMeta && isClosingMomentum(industryMomentumMeta.capturedAt) ? "收盘前" : "上次盘中"} ${momentumN}min 动量`
-    : `${momentumN}min 动量`;
+  const momentumTitle = `${momentumN}min 动量`;
   const momentumCoverage = industryMomentumMeta?.coverage;
   const momentumCoverageLabel = momentumCoverage
     ? `L1 ${momentumCoverage.l1.available}${momentumCoverage.l2.total > 0 ? ` · L2 ${momentumCoverage.l2.available}` : ""}`
@@ -840,18 +1043,9 @@ export function IndustryHeatmap() {
 
   return (
     <div
+      data-testid="industry-heatmap-workbench"
       className="flex flex-col flex-1 w-full h-full bg-white dark:bg-gray-900"
-      onMouseLeave={() => {
-        // 鼠标离开整个组件区域时立即关闭 hover 卡片
-        // 卡片是本 div 的直接子元素，鼠标在卡片上时本事件不会触发（鼠标在子元素上）
-        if (hoverCloseTimer.current) {
-          clearTimeout(hoverCloseTimer.current);
-          hoverCloseTimer.current = null;
-        }
-        setHoveredIndustryName(null);
-        setHoverPos(null);
-        cancelLoadConstituents();
-      }}
+      onMouseLeave={dismissAllHover}
     >
       {/* 顶部工具栏 */}
       <div className="flex items-center gap-4 px-4 py-2 border-b border-gray-200 dark:border-gray-700 text-sm flex-shrink-0">
@@ -868,38 +1062,42 @@ export function IndustryHeatmap() {
         {loading && snapshot !== null && (
           <span className="inline-block w-3.5 h-3.5 border-2 border-gray-300 dark:border-gray-600 border-t-blue-500 rounded-full animate-spin" />
         )}
-        {/* FR-113: 绘制规则下拉 */}
-        <select
+        {/* FR-113/FR-267: 窗口 DOM 内绘制规则下拉，窗口采集可见 */}
+        <HeatmapToolbarSelect
           value={drawRule}
-          onChange={(e) => {
-            const val = e.target.value as DrawRule;
+          options={DRAW_RULE_OPTIONS}
+          ariaLabel="行业云图面积权重"
+          testId="industry-heatmap-draw-rule"
+          className="w-36"
+          onOpen={dismissAllHover}
+          onChange={(val) => {
             setDrawRule(val);
             localStorage.setItem("heatmapDrawRule", val);
             // 切换绘制规则触发 treemap 重排，立即关闭 hover 卡片避免悬浮在错误位置
-            setHoveredIndustryName(null);
+            dismissAllHover();
           }}
-          className="text-sm border border-gray-300 dark:border-gray-600 rounded px-2 py-0.5 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200"
-          title="选择 treemap 面积权重维度"
-        >
-          <option value="marketCap">市值/成交额</option>
-          <option value="absChange">涨跌幅强度</option>
-          <option value="gain">上涨强度</option>
-          <option value="loss">下跌强度</option>
-          <option value="equal">等权</option>
-        </select>
-        <select
+        />
+        <HeatmapToolbarSelect<HeatmapProvider>
           value={provider}
-          onChange={(e) => {
-            const val = e.target.value as "sina" | "eastmoney" | "tushare";
+          options={[
+            { value: "sina", label: "新浪财经" },
+            { value: "eastmoney", label: "东方财富" },
+            {
+              value: "tushare",
+              label: "Tushare 申万",
+              disabled: !tushareReady,
+              disabledReason: !tushareReady ? "请先启用 Tushare 并配置 Token" : undefined,
+            },
+          ]}
+          ariaLabel="行业云图数据源"
+          testId="industry-heatmap-provider"
+          className="w-36"
+          onOpen={dismissAllHover}
+          onChange={(val) => {
             // FR-115: store action 内部完成持久化 + 瞬间切换 + 后台静默拉新
             void setHeatmapProvider(val);
           }}
-          className="text-sm border border-gray-300 dark:border-gray-600 rounded px-2 py-0.5 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200"
-        >
-          <option value="sina">新浪财经</option>
-          <option value="eastmoney">东方财富</option>
-          <option value="tushare" disabled={!tushareReady}>Tushare 申万</option>
-        </select>
+        />
         <button
           type="button"
           onClick={() => fetchHeatmapSnapshot()}
@@ -985,7 +1183,13 @@ export function IndustryHeatmap() {
       {/* 主体区域：双层 Treemap + 动量侧边榜单 */}
       <div className="flex flex-1 min-h-0">
         {/* 图表区：L1 始终挂载，L2 下钻时挂载 */}
-        <div ref={containerRef} className="flex-1 min-w-0 relative">
+        <div
+          ref={containerRef}
+          data-testid="industry-heatmap-chart-region"
+          className="flex-1 min-w-0 relative"
+          onMouseEnter={dismissLeaderboardTooltip}
+          onMouseLeave={hideTreemapTooltip}
+        >
           {/* ── L1 行业层：始终在 DOM，下钻时 visibility:hidden 静默刷新 ── */}
           <div
             style={{
@@ -1043,7 +1247,9 @@ export function IndustryHeatmap() {
           {/* 榜单内容 */}
           {momentumOpen && (
             <div
+              data-testid="industry-heatmap-ranking-panel"
               className="w-44 flex flex-col border-l border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 overflow-hidden"
+              onMouseEnter={hideTreemapTooltip}
               onMouseLeave={() => {
                 // 鼠标离开整个侧边榜单容器时，启动 150ms 关闭计时
                 // 若鼠标移向 hover 卡片（position:fixed），卡片的 onMouseEnter 会取消此计时
@@ -1074,6 +1280,7 @@ export function IndustryHeatmap() {
                         {todayGainers.map((ind) => (
                           <div
                             key={ind.name}
+                            data-testid="industry-heatmap-ranking-item"
                             className="flex items-center justify-between px-3 py-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer"
                             onClick={() => setDrilledIndustry(ind.name)}
                             onMouseEnter={(e) => {
@@ -1115,6 +1322,7 @@ export function IndustryHeatmap() {
                         {todayLosers.map((ind) => (
                           <div
                             key={ind.name}
+                            data-testid="industry-heatmap-ranking-item"
                             className="flex items-center justify-between px-3 py-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer"
                             onClick={() => setDrilledIndustry(ind.name)}
                             onMouseEnter={(e) => {
@@ -1160,19 +1368,31 @@ export function IndustryHeatmap() {
                   {momentumTitle}
                 </div>
                 {industryMomentumMeta && (
-                  <div
-                    className="mt-0.5 text-[11px] leading-4 text-gray-400 dark:text-gray-500 tabular-nums"
-                    title={historicalRecovery
-                      ? `东方财富历史分钟 · 申万行业 · ${momentumCoverageLabel}`
-                      : undefined}
-                  >
-                    <span>
-                      {historicalRecovery ? "历史恢复" : historicalMomentum ? "保留样本" : "实时样本"} · {formatMomentumCapturedAt(industryMomentumMeta.capturedAt)}
-                    </span>
-                    {historicalRecovery && momentumCoverageLabel && (
-                      <span className="block">{momentumCoverageLabel}</span>
-                    )}
-                  </div>
+                  <>
+                    <div className="mt-1">
+                      <span
+                        data-testid="industry-heatmap-momentum-state"
+                        className={`inline-flex max-w-full rounded border px-1.5 py-0.5 text-[10px] font-medium leading-4 ${historicalMomentum
+                          ? "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/35 dark:text-amber-300"
+                          : "border-cyan-200 bg-cyan-50 text-cyan-700 dark:border-cyan-900 dark:bg-cyan-950/35 dark:text-cyan-300"}`}
+                      >
+                        {momentumStateLabel}
+                      </span>
+                    </div>
+                    <div
+                      className="mt-0.5 text-[11px] leading-4 text-gray-400 dark:text-gray-500 tabular-nums"
+                      title={historicalRecovery
+                        ? `东方财富历史分钟 · 申万行业 · ${momentumCoverageLabel}`
+                        : undefined}
+                    >
+                      <span>
+                        {historicalRecovery ? "历史恢复" : historicalMomentum ? "保留样本" : "实时样本"} · {formatMomentumCapturedAt(industryMomentumMeta.capturedAt)}
+                      </span>
+                      {historicalRecovery && momentumCoverageLabel && (
+                        <span className="block">{momentumCoverageLabel}</span>
+                      )}
+                    </div>
+                  </>
                 )}
               </div>
               <div className="flex-1 overflow-y-auto">
@@ -1212,6 +1432,7 @@ export function IndustryHeatmap() {
                         {topMomentumGainers.map(([name, delta]) => (
                           <div
                             key={name}
+                            data-testid="industry-heatmap-ranking-item"
                             className={`flex items-center justify-between px-3 py-0.5 ${nameToCode.has(name) ? "cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" : ""}`}
                             onClick={() => {
                               if (nameToCode.has(name)) setDrilledIndustry(name);
@@ -1258,6 +1479,7 @@ export function IndustryHeatmap() {
                         {topMomentumLosers.map(([name, delta]) => (
                           <div
                             key={name}
+                            data-testid="industry-heatmap-ranking-item"
                             className={`flex items-center justify-between px-3 py-0.5 ${nameToCode.has(name) ? "cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" : ""}`}
                             onClick={() => {
                               if (nameToCode.has(name)) setDrilledIndustry(name);
@@ -1351,6 +1573,7 @@ export function IndustryHeatmap() {
                 : (v / 1e4).toFixed(0) + "万";
           return (
             <div
+              data-testid="industry-heatmap-ranking-tooltip"
               style={{
                 position: "fixed",
                 left: panelLeft,

@@ -6,6 +6,7 @@
 interface RetryOptions {
   maxAttempts?: number
   delays?: number[]
+  shouldRetry?: (error: unknown) => boolean
 }
 
 function sleep(ms: number): Promise<void> {
@@ -27,6 +28,7 @@ export async function withRetry<T>(
       lastError = err
       const errMsg = err instanceof Error ? err.message : String(err)
       console.warn(`[withRetry] Attempt ${attempt} failed: ${errMsg}`)
+      if (options.shouldRetry?.(err) === false) break
       if (attempt < maxAttempts) {
         const delay = delays[attempt - 1] ?? delays[delays.length - 1]
         await sleep(delay)

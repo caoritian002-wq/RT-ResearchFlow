@@ -24,6 +24,14 @@ vi.mock('../../electron/main/database/tradeCalRepository', () => ({
 vi.mock('../../electron/main/services/tushareService', () => ({
   fetchDailyBasicByDate: mocks.fetchDailyBasicByDate,
   fetchDailyByDate: mocks.fetchDailyByDate,
+  getTushareAccessErrorCode: (error: unknown) => {
+    if (typeof error === 'object' && error !== null && 'code' in error) {
+      const code = String((error as { code?: unknown }).code ?? '')
+      if (code.startsWith('TUSHARE_')) return code
+    }
+    const message = error instanceof Error ? error.message : String(error)
+    return message.startsWith('TUSHARE_') ? message : null
+  },
 }))
 vi.mock('../../electron/main/services/tradeCalSyncService', () => ({
   syncTradeCalFull: mocks.syncTradeCalFull,
@@ -139,5 +147,79 @@ describe('historicalDailySyncService', () => {
       failedTradeDays: 0,
       insertedRows: 2,
     })
+  })
+
+  it('daily 首日即返回权限错误时立即停止，不遍历剩余交易日', async () => {
+    const days = ['20260714', '20260715', '20260716', '20260717']
+    mocks.getLastNTradingDays.mockReturnValue(days)
+    const error = Object.assign(new Error('TUSHARE_QUOTA_INSUFFICIENT'), { code: 'TUSHARE_QUOTA_INSUFFICIENT' })
+    mocks.fetchDailyByDate.mockRejectedValue(error)
+
+    await expect(runHistoricalDailySync({} as never, 'token', undefined, {
+      tradeDayCount: days.length,
+      requestDelayMs: 0,
+    })).rejects.toMatchObject({ code: 'TUSHARE_QUOTA_INSUFFICIENT' })
+
+    expect(mocks.fetchDailyByDate).toHaveBeenCalledOnce()
+    expect(mocks.fetchDailyBasicByDate).not.toHaveBeenCalled()
+  })
+
+  it('daily_basic 受限时保留 OHLCV，并停止后续换手率补充', async () => {
+    const days = ['20260716', '20260717']
+    mocks.getLastNTradingDays.mockReturnValue(days)
+    mocks.fetchDailyByDate.mockImplementation(async (_token: string, tradeDate: string) => [{
+      tsCode: '600487.SH', tradeDate, open: 10, high: 11, low: 9, close: 10.5,
+      pctChg: 1, vol: 100, turnoverRate: null,
+    }])
+    const error = Object.assign(new Error('TUSHARE_RATE_LIMITED'), { code: 'TUSHARE_RATE_LIMITED' })
+    mocks.fetchDailyBasicByDate.mockRejectedValue(error)
+
+    const result = await runHistoricalDailySync({} as never, 'token', undefined, {
+      tradeDayCount: days.length,
+      requestDelayMs: 0,
+    })
+
+    expect(mocks.fetchDailyByDate).toHaveBeenCalledTimes(2)
+    expect(mocks.fetchDailyBasicByDate).toHaveBeenCalledOnce()
+    expect(mocks.upsertDailyClose).toHaveBeenCalledTimes(2)
+    expect(result).toMatchObject({
+      syncedTradeDays: 2,
+      failedTradeDays: 0,
+      turnoverSupplementWarning: 'TUSHARE_RATE_LIMITED',
+    })
+  })
+
+  it('daily_basic 普通网络失败也只尝试一次，不放大为逐日重试', async () => {
+    const days = ['20260715', '20260716', '20260717']
+    mocks.getLastNTradingDays.mockReturnValue(days)
+    mocks.fetchDailyByDate.mockImplementation(async (_token: string, tradeDate: string) => [{
+      tsCode: '600487.SH', tradeDate, open: 10, high: 11, low: 9, close: 10.5,
+      pctChg: 1, vol: 100, turnoverRate: null,
+    }])
+    mocks.fetchDailyBasicByDate.mockRejectedValue(new Error('network unavailable'))
+
+    const result = await runHistoricalDailySync({} as never, 'token', undefined, {
+      tradeDayCount: days.length,
+      requestDelayMs: 0,
+    })
+
+    expect(mocks.fetchDailyByDate).toHaveBeenCalledTimes(3)
+    expect(mocks.fetchDailyBasicByDate).toHaveBeenCalledOnce()
+    expect(mocks.upsertDailyClose).toHaveBeenCalledTimes(3)
+    expect(result.turnoverSupplementWarning).toBe('TUSHARE_UPSTREAM_UNAVAILABLE')
+  })
+
+  it('连续三个交易日没有有效结果时熔断，不继续请求剩余日期', async () => {
+    const days = ['20260713', '20260714', '20260715', '20260716', '20260717']
+    mocks.getLastNTradingDays.mockReturnValue(days)
+    mocks.fetchDailyByDate.mockResolvedValue([])
+
+    await expect(runHistoricalDailySync({} as never, 'token', undefined, {
+      tradeDayCount: days.length,
+      requestDelayMs: 0,
+    })).rejects.toMatchObject({ code: 'HISTORICAL_DAILY_UPSTREAM_UNAVAILABLE' })
+
+    expect(mocks.fetchDailyByDate).toHaveBeenCalledTimes(3)
+    expect(mocks.fetchDailyBasicByDate).not.toHaveBeenCalled()
   })
 })

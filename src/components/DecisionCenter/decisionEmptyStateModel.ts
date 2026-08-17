@@ -45,9 +45,9 @@ export function buildDecisionEmptyStateModel(initialization: InitializationModel
 
   if (initialization.emptyReason === 'datasourceMissing') {
     return {
-      title: '需要先配置数据源',
+      title: '今日暂无信号，全市场增强数据待配置',
       description: initialization.description,
-      tone: 'amber',
+      tone: 'blue',
       primaryAction: initialization.primaryAction,
       secondaryAction: initialization.secondaryAction
     }
@@ -55,7 +55,7 @@ export function buildDecisionEmptyStateModel(initialization: InitializationModel
 
   if (initialization.emptyReason === 'stockBasicMissing') {
     return {
-      title: '需要同步股票基础数据',
+      title: '今日暂无信号，全市场索引待补齐',
       description: initialization.description,
       tone: 'amber',
       primaryAction: initialization.primaryAction,

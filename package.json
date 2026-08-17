@@ -1,6 +1,6 @@
 {
   "name": "rt-research-flow",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.4",
   "description": "RT-ResearchFlow - 本地优先的 A 股个人投研工作台",
   "main": "./out/main/index.js",
   "author": "",
@@ -16,6 +16,10 @@
     "build": "electron-vite build && vite build --config research-access.vite.config.ts && node scripts/report-build-sizes.mjs",
     "report:size": "node scripts/report-build-sizes.mjs",
     "measure:startup": "node scripts/measure-cold-start.mjs",
+    "probe:daily-sources": "node scripts/probe-daily-bar-sources.mjs",
+    "probe:stock-universe": "node scripts/probe-public-stock-universe.mjs",
+    "probe:daily-snapshot": "node scripts/probe-public-daily-snapshot.mjs",
+    "test:daily-source-transformer": "node --test scripts/probe-daily-bar-*.test.mjs scripts/probe-public-stock-universe.test.mjs",
     "preview": "electron-vite preview",
     "dist": "npm run build && electron-builder --config electron-builder.js",
     "dist:win": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --config electron-builder.js",

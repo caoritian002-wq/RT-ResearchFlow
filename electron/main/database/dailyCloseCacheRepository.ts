@@ -60,9 +60,57 @@ interface CacheRow {
   pct_chg: number | null
   vol: number | null
   turnover_rate: number | null
+  amount?: number | null
+  data_source?: string
+  amount_source?: string | null
+  turnover_source?: string | null
+  fetched_at?: number | null
 }
 
-function toDbRow(r: DailyRow): CacheRow {
+export type DailyCloseWriteSource = 'legacy' | 'tushare' | 'sina' | 'tencent' | 'sina_snapshot' | 'eastmoney'
+
+export interface DailyCloseWriteMetadata {
+  dataSource: DailyCloseWriteSource
+  fetchedAt?: number
+  amountSource?: DailyCloseWriteSource | null
+  turnoverSource?: DailyCloseWriteSource | null
+}
+
+const provenanceColumnNames = [
+  'amount',
+  'data_source',
+  'amount_source',
+  'turnover_source',
+  'fetched_at',
+] as const
+
+const provenanceCapabilityByDb = new WeakMap<Database.Database, boolean>()
+
+function hasDailyCloseProvenanceColumns(db: Database.Database): boolean {
+  const cached = provenanceCapabilityByDb.get(db)
+  if (cached !== undefined) return cached
+
+  const statement = db.prepare('PRAGMA table_info(daily_close_cache)') as unknown as {
+    all?: () => Array<{ name?: unknown }>
+  }
+  if (typeof statement.all !== 'function') {
+    provenanceCapabilityByDb.set(db, false)
+    return false
+  }
+
+  const columns = statement.all()
+  const columnNames = new Set(
+    columns
+      .map((column) => column.name)
+      .filter((name): name is string => typeof name === 'string'),
+  )
+  const supported = provenanceColumnNames.every((name) => columnNames.has(name))
+  provenanceCapabilityByDb.set(db, supported)
+  return supported
+}
+
+function toDbRow(r: DailyRow, metadata?: DailyCloseWriteMetadata): CacheRow {
+  const dataSource = metadata?.dataSource ?? 'legacy'
   return {
     ts_code: r.tsCode,
     trade_date: r.tradeDate,
@@ -72,7 +120,12 @@ function toDbRow(r: DailyRow): CacheRow {
     close: r.close,
     pct_chg: r.pctChg,
     vol: r.vol ?? null,
-    turnover_rate: r.turnoverRate ?? null
+    turnover_rate: r.turnoverRate ?? null,
+    amount: r.amount ?? null,
+    data_source: dataSource,
+    amount_source: r.amount == null ? null : (metadata?.amountSource ?? dataSource),
+    turnover_source: r.turnoverRate == null ? null : (metadata?.turnoverSource ?? dataSource),
+    fetched_at: metadata?.fetchedAt ?? Date.now(),
   }
 }
 
@@ -102,8 +155,16 @@ function mergeDailyRows(
 }
 
 /** 批量写入日线缓存，增量响应缺失的字段保留已有非空值。 */
-export function upsertDailyClose(db: Database.Database, rows: DailyRow[]): void {
+export function upsertDailyClose(
+  db: Database.Database,
+  rows: DailyRow[],
+  metadata?: DailyCloseWriteMetadata,
+): void {
   if (rows.length === 0) return
+  if (hasDailyCloseProvenanceColumns(db)) {
+    upsertDailyCloseWithProvenance(db, rows, metadata)
+    return
+  }
   const stmt = db.prepare(
     `INSERT INTO daily_close_cache (ts_code, trade_date, open, high, low, close, pct_chg, vol, turnover_rate)
      VALUES (@ts_code, @trade_date, @open, @high, @low, @close, @pct_chg, @vol, @turnover_rate)
@@ -121,7 +182,83 @@ export function upsertDailyClose(db: Database.Database, rows: DailyRow[]): void 
       stmt.run(item)
     }
   })
-  runAll(rows.map(toDbRow))
+  runAll(rows.map((row) => toDbRow(row, metadata)))
+}
+
+function sourceRank(alias: string, column = 'data_source'): string {
+  return `CASE ${alias}.${column}
+    WHEN 'tushare' THEN 6
+    WHEN 'legacy' THEN 5
+    WHEN 'sina_snapshot' THEN 4
+    WHEN 'eastmoney' THEN 3
+    WHEN 'sina' THEN 2
+    WHEN 'tencent' THEN 1
+    ELSE 0 END`
+}
+
+function preferredValue(field: string): string {
+  const incomingRank = sourceRank('excluded')
+  const existingRank = sourceRank('daily_close_cache')
+  return `CASE WHEN ${incomingRank} >= ${existingRank}
+    THEN COALESCE(excluded.${field}, daily_close_cache.${field})
+    ELSE COALESCE(daily_close_cache.${field}, excluded.${field}) END`
+}
+
+function preferredSupplement(field: 'amount' | 'turnover_rate', sourceColumn: 'amount_source' | 'turnover_source'): string {
+  const incomingRank = sourceRank('excluded', sourceColumn)
+  const existingRank = sourceRank('daily_close_cache', sourceColumn)
+  return `CASE
+    WHEN excluded.${field} IS NULL THEN daily_close_cache.${field}
+    WHEN daily_close_cache.${field} IS NULL THEN excluded.${field}
+    WHEN ${incomingRank} >= ${existingRank} THEN excluded.${field}
+    ELSE daily_close_cache.${field} END`
+}
+
+function preferredSupplementSource(field: 'amount' | 'turnover_rate', sourceColumn: 'amount_source' | 'turnover_source'): string {
+  const incomingRank = sourceRank('excluded', sourceColumn)
+  const existingRank = sourceRank('daily_close_cache', sourceColumn)
+  return `CASE
+    WHEN excluded.${field} IS NULL THEN daily_close_cache.${sourceColumn}
+    WHEN daily_close_cache.${field} IS NULL THEN excluded.${sourceColumn}
+    WHEN ${incomingRank} >= ${existingRank} THEN excluded.${sourceColumn}
+    ELSE daily_close_cache.${sourceColumn} END`
+}
+
+function upsertDailyCloseWithProvenance(
+  db: Database.Database,
+  rows: DailyRow[],
+  metadata?: DailyCloseWriteMetadata,
+): void {
+  const incomingRank = sourceRank('excluded')
+  const existingRank = sourceRank('daily_close_cache')
+  const stmt = db.prepare(`
+    INSERT INTO daily_close_cache (
+      ts_code, trade_date, open, high, low, close, pct_chg, vol,
+      turnover_rate, amount, data_source, amount_source, turnover_source, fetched_at
+    ) VALUES (
+      @ts_code, @trade_date, @open, @high, @low, @close, @pct_chg, @vol,
+      @turnover_rate, @amount, @data_source, @amount_source, @turnover_source, @fetched_at
+    )
+    ON CONFLICT(ts_code, trade_date) DO UPDATE SET
+      open = ${preferredValue('open')},
+      high = ${preferredValue('high')},
+      low = ${preferredValue('low')},
+      close = ${preferredValue('close')},
+      pct_chg = ${preferredValue('pct_chg')},
+      vol = ${preferredValue('vol')},
+      turnover_rate = ${preferredSupplement('turnover_rate', 'turnover_source')},
+      amount = ${preferredSupplement('amount', 'amount_source')},
+      data_source = CASE WHEN ${incomingRank} >= ${existingRank}
+        THEN excluded.data_source ELSE daily_close_cache.data_source END,
+      amount_source = ${preferredSupplementSource('amount', 'amount_source')},
+      turnover_source = ${preferredSupplementSource('turnover_rate', 'turnover_source')},
+      fetched_at = CASE WHEN ${incomingRank} >= ${existingRank}
+        THEN excluded.fetched_at ELSE daily_close_cache.fetched_at END
+  `)
+  const write = db.transaction((items: CacheRow[]) => {
+    for (const item of items) stmt.run(item)
+  })
+  write(rows.map((row) => toDbRow(row, metadata)))
 }
 
 /**

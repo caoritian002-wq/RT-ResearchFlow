@@ -65,13 +65,13 @@ export function buildInitializationModel(snapshot: DiagnosticsHealthSnapshot | n
   const items = allItems(snapshot)
   const tushare = findItem(snapshot, ['config.tushare'])
   const ai = findItem(snapshot, ['config.ai'])
-  const stockBasic = findItem(snapshot, ['stockBasic', 'sync.stockBasic'])
-  const decisionSignals = findItem(snapshot, ['decisionSignals', 'sync.decisionBackfill'])
+  const stockBasic = findItem(snapshot, ['freshness.stockBasic', 'stockBasic', 'sync.stockBasic'])
+  const decisionSignals = findItem(snapshot, ['freshness.decisionSignals', 'decisionSignals', 'sync.decisionBackfill'])
   const blockers = items.filter(item => item.status === 'error')
   const warnings = items.filter(item => item.status === 'warning')
   const stockBasicReady = isOk(stockBasic) || hasRecords(stockBasic)
   const decisionReady = isOk(decisionSignals) || hasRecords(decisionSignals)
-  const minimumUsable = isOk(tushare) && stockBasicReady
+  const minimumUsable = blockers.length === 0
 
   if (syncing) {
     return {
@@ -87,12 +87,26 @@ export function buildInitializationModel(snapshot: DiagnosticsHealthSnapshot | n
     }
   }
 
+  if (blockers.length > 0) {
+    return {
+      status: 'actionRequired',
+      title: '诊断发现需要处理的问题',
+      description: blockers[0]?.message ?? '部分关键数据或数据库状态异常, 建议先进入诊断页处理。',
+      minimumUsable: false,
+      emptyReason: 'diagnosticsError',
+      primaryAction: { type: 'config', tab: 'diagnostics', label: '打开诊断页' },
+      secondaryAction: { type: 'guide', label: '查看初始化引导' },
+      blockers,
+      warnings
+    }
+  }
+
   if (!isOk(tushare)) {
     return {
-      status: 'blocked',
-      title: '需要先配置 Tushare',
-      description: tushare?.message ?? 'Tushare 是股票基础数据、题材同步和今日看板补种的基础数据源。',
-      minimumUsable: false,
+      status: 'usable',
+      title: '基础功能可使用，增强数据源待配置',
+      description: '资讯、本地研究和六位代码直查可继续使用；配置 Tushare 后可补齐全市场股票索引、题材和历史日线。',
+      minimumUsable: true,
       emptyReason: 'datasourceMissing',
       primaryAction: { type: 'config', tab: 'datasource', label: '打开数据源配置' },
       secondaryAction: { type: 'guide', label: '查看初始化引导' },
@@ -104,25 +118,11 @@ export function buildInitializationModel(snapshot: DiagnosticsHealthSnapshot | n
   if (!stockBasicReady) {
     return {
       status: 'actionRequired',
-      title: '需要同步股票基础数据',
-      description: stockBasic?.message ?? '本地股票基础数据为空时, 走势图搜索和今日看板补种都缺少基础索引。',
-      minimumUsable: false,
+      title: '基础功能可使用，全市场索引待补齐',
+      description: stockBasic?.message ?? '六位代码直查和资讯仍可使用；同步股票基础数据后可使用名称搜索和全市场候选。',
+      minimumUsable: true,
       emptyReason: 'stockBasicMissing',
       primaryAction: { type: 'run', runAction: 'syncStockBasic', label: '同步股票基础数据' },
-      secondaryAction: { type: 'guide', label: '查看初始化引导' },
-      blockers,
-      warnings
-    }
-  }
-
-  if (blockers.length > 0) {
-    return {
-      status: 'actionRequired',
-      title: '诊断发现需要处理的问题',
-      description: blockers[0]?.message ?? '部分关键数据或数据库状态异常, 建议先进入诊断页处理。',
-      minimumUsable,
-      emptyReason: 'diagnosticsError',
-      primaryAction: { type: 'config', tab: 'diagnostics', label: '打开诊断页' },
       secondaryAction: { type: 'guide', label: '查看初始化引导' },
       blockers,
       warnings

@@ -35,6 +35,7 @@ const TASK_STATUS_META: Record<string, { label: string; className: string }> = {
   success: { label: '成功', className: 'text-emerald-700 dark:text-emerald-300' },
   failed: { label: '失败', className: 'text-red-700 dark:text-red-300' },
   skipped: { label: '跳过', className: 'text-gray-500 dark:text-gray-400' },
+  deferred: { label: '稍后同步', className: 'text-cyan-700 dark:text-cyan-300' },
   retryable: { label: '可重试', className: 'text-amber-700 dark:text-amber-300' }
 }
 
@@ -54,7 +55,7 @@ export function ColdStartGuide({ snapshot, loading = false, flow, onRefresh, onO
     try {
       const res = await window.api.diagnostics.runCheck(action)
       if (res.ok) {
-        setActionStates(prev => ({ ...prev, [action]: 'success' }))
+        setActionStates(prev => ({ ...prev, [action]: res.data.status === 'started' ? 'idle' : 'success' }))
         setMessage(res.data.message)
         await onRefresh()
       } else {
@@ -122,7 +123,9 @@ export function ColdStartGuide({ snapshot, loading = false, flow, onRefresh, onO
           <div className="flex items-center justify-between gap-2">
             <div>
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">一键初始化</div>
-              <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{flowProgress.done}/{flowProgress.total} 完成 · {flowProgress.failed} 个需处理</div>
+              <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                {flowProgress.done}/{flowProgress.total} 完成 · {flowProgress.deferred} 项稍后同步 · {flowProgress.failed} 个需处理
+              </div>
             </div>
             <button
               type="button"
@@ -150,9 +153,9 @@ export function ColdStartGuide({ snapshot, loading = false, flow, onRefresh, onO
                     </div>
                     {(task.message || task.error) && <div className="mt-0.5 text-gray-500 dark:text-gray-400">{task.error ?? task.message}</div>}
                   </div>
-                  {(task.status === 'failed' || task.status === 'retryable') && (
+                  {(task.status === 'failed' || task.status === 'retryable' || task.status === 'deferred') && (
                     <button type="button" onClick={() => onRetryTask(task.key)} disabled={flow.running} className="rounded border border-amber-200 px-2 py-0.5 text-[11px] text-amber-700 hover:bg-amber-50 disabled:opacity-50 dark:border-amber-900/60 dark:text-amber-300 dark:hover:bg-amber-950/40">
-                      重试
+                      {task.status === 'deferred' ? '立即同步' : '重试'}
                     </button>
                   )}
                 </div>

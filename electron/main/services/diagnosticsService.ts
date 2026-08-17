@@ -28,7 +28,9 @@ import {
   type DataQualitySnapshot,
 } from './dataQualityService'
 import { syncTradeCalFull } from './tradeCalSyncService'
-import { fetchIndexDailyForCodes } from './tushareService'
+import { fetchIndexDailyForCodes, getTushareAccessErrorCode } from './tushareService'
+import { getPublicMarketSyncJob } from '../database/publicMarketDataRepository'
+import { runPublicHistoricalDailySync } from './publicHistoricalDailySyncService'
 
 export type DiagnosticStatus = 'ok' | 'warning' | 'error'
 export type DiagnosticGroupKey = 'config' | 'freshness' | 'sync' | 'database'
@@ -312,22 +314,42 @@ function buildFreshnessGroup(db: Database.Database, checkedAt: number): Diagnost
 function buildSyncGroup(db: Database.Database, checkedAt: number): DiagnosticGroup {
   const dsConfig = getDataSourceConfig(db)
   const hasTushare = !!(dsConfig.tushareEnabled && dsConfig.tushareTokenEncrypted)
+  const publicStockJob = tableExists(db, 'public_market_sync_jobs')
+    ? getPublicMarketSyncJob(db, 'stock_universe')
+    : null
+  const publicStockMessage = publicStockJob?.status === 'running'
+    ? `公共证券列表后台同步中：${publicStockJob.processedItems}/${publicStockJob.totalItems} 页`
+    : publicStockJob?.status === 'cooldown'
+      ? (publicStockJob.message ?? '公共证券来源正在冷却，稍后可继续')
+      : publicStockJob?.status === 'failed'
+        ? (publicStockJob.message ?? '公共证券列表上次同步失败，可稍后重试')
+        : '无Token可走新浪低频公共列表，通常约1分钟并在后台完成'
+  const publicDailyJob = tableExists(db, 'public_market_sync_jobs')
+    ? getPublicMarketSyncJob(db, 'historical_daily_public')
+    : null
+  const publicDailyMessage = publicDailyJob?.status === 'running'
+    ? `公共历史日线后台回补中：${publicDailyJob.processedItems}/${publicDailyJob.totalItems} 只`
+    : publicDailyJob?.status === 'partial'
+      ? (publicDailyJob.message ?? '公共历史日线部分完成，可从检查点继续')
+      : publicDailyJob?.status === 'cooldown'
+        ? (publicDailyJob.message ?? '公共日线来源正在冷却，稍后可继续')
+        : '无Token可在后台低频回补，通常约2小时且支持冷却后自动续跑'
   const items: DiagnosticItem[] = [
     {
       key: 'sync.stockBasic',
       title: '股票基础数据同步',
-      status: hasTushare ? 'ok' : 'warning',
-      message: hasTushare ? '可手动触发同步' : '需要先配置 Tushare',
-      detail: '新用户搜索股票名前需要先初始化股票基础数据。',
+      status: publicStockJob?.status === 'failed' || publicStockJob?.status === 'cooldown' ? 'warning' : 'ok',
+      message: hasTushare ? '优先使用Tushare完整证券主数据' : publicStockMessage,
+      detail: 'Tushare提供完整行业和股本；零Key公共路径只补证券身份并保留本地丰富字段。',
       checkedAt,
       actions: [{ key: 'syncStockBasic', label: '立即同步', kind: 'run' }]
     },
     {
       key: 'sync.historicalDaily',
       title: '全市场历史日线同步',
-      status: hasTushare ? 'ok' : 'warning',
-      message: hasTushare ? '可同步近 2 年全市场日线' : '需要先配置 Tushare',
-      detail: '条件积木全市场扫描、策略回测和历史筛选依赖该本地底座。',
+      status: publicDailyJob?.status === 'failed' || publicDailyJob?.status === 'cooldown' ? 'warning' : 'ok',
+      message: hasTushare ? '可通过Tushare快速同步近2年全市场日线' : publicDailyMessage,
+      detail: '零Key路径按单股保存检查点，新浪主源、腾讯仅按需兜底沪深，不阻断基础入口。',
       checkedAt,
       actions: [{ key: 'syncHistoricalDaily', label: '立即同步', kind: 'run' }]
     },
@@ -439,6 +461,16 @@ function ensureTushareConfigured(db: Database.Database): string {
   return token
 }
 
+function shouldFallbackHistoricalDailyToPublic(error: unknown): boolean {
+  if (getTushareAccessErrorCode(error)) return true
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : ''
+  if (['HISTORICAL_DAILY_UPSTREAM_UNAVAILABLE', 'TRADE_CAL_HISTORY_INCOMPLETE'].includes(code)) return true
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return /fetch failed|network|socket|timeout|ECONN|ETIMEDOUT|ENOTFOUND/i.test(message)
+}
+
 export async function runDiagnosticAction(db: Database.Database, action: DiagnosticRunAction, win?: BrowserWindow): Promise<DiagnosticRunResult> {
   switch (action) {
     case 'refreshHealth':
@@ -452,11 +484,28 @@ export async function runDiagnosticAction(db: Database.Database, action: Diagnos
         message: `完整检查已保存：${snapshot.summary.reliable} 项可用，${snapshot.summary.degraded} 项需注意，${snapshot.summary.blocked} 项阻断`,
       }
     }
-    case 'syncStockBasic':
-      ensureTushareConfigured(db)
-      await runStockBasicSyncJob()
+    case 'syncStockBasic': {
+      const config = getDataSourceConfig(db)
+      const hasTushare = !!(config.tushareEnabled && config.tushareTokenEncrypted)
+      if (!hasTushare) {
+        void runStockBasicSyncJob().catch((error) => {
+          console.warn('[Diagnostics] public stock universe background sync failed:', error instanceof Error ? error.message : String(error))
+        })
+        return {
+          action,
+          status: 'started',
+          message: '已在后台启动公共证券列表同步；单并发低频执行，通常约1分钟，基础入口不受阻塞。',
+        }
+      }
+      const result = await runStockBasicSyncJob()
+      if (!result) throw new Error('STOCK_BASIC_SYNC_FAILED')
       persistDataQualitySnapshot(db)
-      return { action, status: 'completed', message: '股票基础数据同步完成' }
+      return {
+        action,
+        status: 'completed',
+        message: `股票基础数据同步完成，来源 ${result.source}，共 ${result.rowCount} 只`,
+      }
+    }
     case 'syncTradeCalendar': {
       const token = ensureTushareConfigured(db)
       const result = await syncTradeCalFull(db, token)
@@ -466,14 +515,47 @@ export async function runDiagnosticAction(db: Database.Database, action: Diagnos
       return { action, status: 'completed', message: `交易日历同步完成，写入 ${result.rowCount} 条并重新检查` }
     }
     case 'syncHistoricalDaily': {
+      const config = getDataSourceConfig(db)
+      const hasTushare = !!(config.tushareEnabled && config.tushareTokenEncrypted)
+      const targetEndDate = getHistoricalDailyDefaultEndDate()
+      if (!hasTushare) {
+        void runPublicHistoricalDailySync(db, targetEndDate).catch((error) => {
+          console.warn('[Diagnostics] public historical daily background sync failed:', error instanceof Error ? error.message : String(error))
+        })
+        return {
+          action,
+          status: 'started',
+          message: '已在后台启动公共历史日线回补；单并发低频执行，通常约2小时，逐股保存检查点并在冷却后自动续跑。',
+        }
+      }
       const token = ensureTushareConfigured(db)
-      const result = await runHistoricalDailySync(db, token, win)
+      let result: Awaited<ReturnType<typeof runHistoricalDailySync>>
+      try {
+        result = await runHistoricalDailySync(db, token, win)
+      } catch (error) {
+        if (!shouldFallbackHistoricalDailyToPublic(error)) throw error
+        const reason = getTushareAccessErrorCode(error)
+          ?? (typeof error === 'object' && error !== null && 'code' in error
+            ? String((error as { code?: unknown }).code ?? 'TUSHARE_UPSTREAM_UNAVAILABLE')
+            : 'TUSHARE_UPSTREAM_UNAVAILABLE')
+        void runPublicHistoricalDailySync(db, targetEndDate).catch((publicError) => {
+          console.warn('[Diagnostics] public historical daily fallback failed:', publicError instanceof Error ? publicError.message : String(publicError))
+        })
+        return {
+          action,
+          status: 'started',
+          message: `Tushare 当前不可用（${reason}），已切换为公共来源后台低频回补；通常约2小时，按单股保存检查点并在冷却后自动续跑。`,
+        }
+      }
       persistDataQualitySnapshot(db)
       const failedMessage = result.failedDates.length > 0 ? `, 失败 ${result.failedDates.length} 日` : ''
+      const turnoverMessage = result.turnoverSupplementWarning
+        ? `；OHLCV 已保留，换手率补充已停止（${result.turnoverSupplementWarning}）`
+        : ''
       return {
         action,
         status: 'completed',
-        message: `全市场历史日线同步完成：区间 ${result.startDate ?? '—'}~${result.endDate ?? '—'}, 跳过 ${result.skippedTradeDays} 日, 同步 ${result.syncedTradeDays} 日, 写入 ${result.insertedRows} 行${failedMessage}`
+        message: `全市场历史日线同步完成：区间 ${result.startDate ?? '—'}~${result.endDate ?? '—'}, 跳过 ${result.skippedTradeDays} 日, 同步 ${result.syncedTradeDays} 日, 写入 ${result.insertedRows} 行${failedMessage}${turnoverMessage}`
       }
     }
     case 'syncMarketBenchmarks': {
@@ -488,14 +570,20 @@ export async function runDiagnosticAction(db: Database.Database, action: Diagnos
       if (!startDate) throw new Error('TRADE_CAL_HISTORY_INCOMPLETE')
       const rows = await fetchIndexDailyForCodes(token, [...CORE_BENCHMARK_CODES], startDate, endDate)
       if (rows.length === 0) throw new Error('BENCHMARK_SYNC_EMPTY')
-      upsertDailyClose(db, rows)
+      upsertDailyClose(db, rows, {
+        dataSource: 'tushare',
+        amountSource: 'tushare',
+        turnoverSource: 'tushare',
+        fetchedAt: Date.now(),
+      })
       persistDataQualitySnapshot(db)
       return { action, status: 'completed', message: `核心基准同步完成，写入 ${rows.length} 条指数日线` }
     }
     case 'syncConceptMembers':
       ensureTushareConfigured(db)
-      void runConceptMembersSyncJob()
-      return { action, status: 'started', message: '已触发题材成分同步' }
+      await runConceptMembersSyncJob()
+      persistDataQualitySnapshot(db)
+      return { action, status: 'completed', message: '题材成分同步已结束并重新检查' }
     case 'backfillDecisionSignals':
       await ensureTodayDecisionSignalsBackfilled(db, true)
       return { action, status: 'completed', message: '今日看板信号已刷新' }

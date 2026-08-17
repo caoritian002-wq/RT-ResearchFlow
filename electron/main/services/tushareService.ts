@@ -69,6 +69,51 @@ interface TushareResponse {
   }
 }
 
+export type TushareAccessErrorCode =
+  | 'TUSHARE_QUOTA_INSUFFICIENT'
+  | 'TUSHARE_RATE_LIMITED'
+  | 'TUSHARE_AUTH_FAILED'
+  | 'TUSHARE_REQUEST_TIMEOUT'
+
+const TUSHARE_REQUEST_TIMEOUT_MS = 15_000
+const TUSHARE_ACCESS_ERROR_CODES = new Set<TushareAccessErrorCode>([
+  'TUSHARE_QUOTA_INSUFFICIENT',
+  'TUSHARE_RATE_LIMITED',
+  'TUSHARE_AUTH_FAILED',
+  'TUSHARE_REQUEST_TIMEOUT',
+])
+
+/** 把上游自然语言错误收敛为可判定终态，频率限制必须先于通用“权限”文案识别。 */
+export function getTushareAccessErrorCode(error: unknown): TushareAccessErrorCode | null {
+  const explicitCode = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : ''
+  if (TUSHARE_ACCESS_ERROR_CODES.has(explicitCode as TushareAccessErrorCode)) {
+    return explicitCode as TushareAccessErrorCode
+  }
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  for (const code of TUSHARE_ACCESS_ERROR_CODES) {
+    if (message.includes(code)) return code
+  }
+  if (error instanceof Error && error.name === 'AbortError') return 'TUSHARE_REQUEST_TIMEOUT'
+  if (/HTTP_429|每分钟|每小时|最多访问|访问频率|访问过于频繁|频次|限流|稍后再试/i.test(message)) {
+    return 'TUSHARE_RATE_LIMITED'
+  }
+  if (/HTTP_401|token\s*(?:无效|错误|不存在)|无效.*token|用户不存在|认证失败/i.test(message)) {
+    return 'TUSHARE_AUTH_FAILED'
+  }
+  if (/HTTP_403|没有访问.*权限|权限不足|积分不足|积分|购买|套餐|未开通|需要开通/i.test(message)) {
+    return 'TUSHARE_QUOTA_INSUFFICIENT'
+  }
+  return null
+}
+
+function createTushareAccessError(code: TushareAccessErrorCode): Error & { code: TushareAccessErrorCode } {
+  const error = new Error(code) as Error & { code: TushareAccessErrorCode }
+  error.code = code
+  return error
+}
+
 /** Tushare Pro REST API: POST JSON body format */
 function buildRequest(token: string, apiName: string, params: Record<string, string>, fields: string) {
   return {
@@ -1069,18 +1114,32 @@ async function callTushareApi(
 ): Promise<TushareResponse> {
   let json: TushareResponse
   try {
-    const res = await withRetry(() => fetch(TUSHARE_API_URL, buildRequest(token, apiName, params, fields)))
-    json = (await res.json()) as TushareResponse
+    json = await withRetry(async () => {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), TUSHARE_REQUEST_TIMEOUT_MS)
+      try {
+        const response = await fetch(TUSHARE_API_URL, {
+          ...buildRequest(token, apiName, params, fields),
+          signal: controller.signal,
+        })
+        if (response.ok === false) throw new Error(`HTTP_${response.status}`)
+        return (await response.json()) as TushareResponse
+      } finally {
+        clearTimeout(timer)
+      }
+    }, {
+      shouldRetry: (error) => getTushareAccessErrorCode(error) === null,
+    })
   } catch (err) {
+    const accessCode = getTushareAccessErrorCode(err)
+    if (accessCode) throw createTushareAccessError(accessCode)
     const msg = err instanceof Error ? err.message : String(err)
     throw new Error(`${apiName} network error: ${msg}`)
   }
   if (json.code !== 0) {
     const msg = json.msg || `code=${json.code}`
-    // 积分不足判定: Tushare 通常返回 "权限" / "积分" / "购买" 等关键字
-    if (/权限|积分|购买|套餐|开通/.test(msg)) {
-      throw new Error('TUSHARE_QUOTA_INSUFFICIENT')
-    }
+    const accessCode = getTushareAccessErrorCode(msg)
+    if (accessCode) throw createTushareAccessError(accessCode)
     throw new Error(`${apiName} API error: ${msg}`)
   }
   return json
