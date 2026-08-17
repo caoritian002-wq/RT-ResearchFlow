@@ -94,13 +94,24 @@ async function seedMorningAuctionPriceHistory(app: TestElectronApp): Promise<voi
             1.2,
           )
         })
+        closeInsert.run(
+          stock.tsCode,
+          fixture.tradeDate,
+          stock.targetClose,
+          stock.targetPctChg,
+          stock.targetClose,
+          stock.targetClose,
+          stock.targetClose,
+          900_000,
+          1.3,
+        )
       })
     })()
     db.close()
   }, {
-    tradeDate: '20260812',
-    previousTradeDate: '20260811',
-    closeDates: ['20260804', '20260805', '20260806', '20260807', '20260810', '20260811'],
+    tradeDate: '20260813',
+    previousTradeDate: '20260812',
+    closeDates: ['20260805', '20260806', '20260807', '20260810', '20260811', '20260812'],
     stocks: [
       {
         tsCode: '600101.SH',
@@ -108,6 +119,8 @@ async function seedMorningAuctionPriceHistory(app: TestElectronApp): Promise<voi
         preClose: 15,
         auctionPrice: 15.75,
         closes: [10, 11, 12, 13, 14, 15],
+        targetClose: 15.5,
+        targetPctChg: 3.3333,
       },
       {
         tsCode: '600102.SH',
@@ -115,6 +128,8 @@ async function seedMorningAuctionPriceHistory(app: TestElectronApp): Promise<voi
         preClose: 15,
         auctionPrice: 15.6,
         closes: [20, 19, 18, 17, 16, 15],
+        targetClose: 14.25,
+        targetPctChg: -5,
       },
     ],
   })
@@ -134,22 +149,26 @@ async function seedLateAuctionCandidate(app: TestElectronApp): Promise<void> {
         ts_code, trade_date, price, vol, amount, pre_close, turnover_rate,
         volume_ratio, float_share, fetched_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('600102.SH', '20260812', 15.6, 1_800_000, 36_000_000, 15, 0.82, 1.6, 800_000_000, Date.now())
+    `).run('600102.SH', '20260813', 15.6, 1_800_000, 36_000_000, 15, 0.82, 1.6, 800_000_000, Date.now())
     db.close()
   })
 }
 
-async function openMorningAuction(window: Page): Promise<void> {
+async function openMorningAuction(window: Page, tradeDate: string): Promise<void> {
   const guide = window.getByTestId('cold-start-guide')
   if (await guide.isVisible()) await guide.getByLabel('关闭引导').click()
   await window.getByTestId('nav-tab-short-term-strategy').click()
   await window.getByTestId('secondary-nav-short-term-strategy-morningAuction').click()
+  await window.getByLabel('交易日').fill(`${tradeDate.slice(0, 4)}-${tradeDate.slice(4, 6)}-${tradeDate.slice(6, 8)}`)
   await expect(window.getByTestId('morning-auction-price-history-coverage')).toBeVisible({ timeout: 30_000 })
 }
 
 async function expectRisingPriceHistoryValue(window: Page): Promise<void> {
   const risingRow = window.locator('tbody tr').filter({ hasText: '历史样本甲' }).first()
   await expect(risingRow).toBeVisible()
+  await expect(risingRow.locator('td').nth(3)).toHaveText('15.50')
+  await expect(risingRow.locator('td').nth(4)).toHaveText('+3.33%')
+  await expect(risingRow.locator('td').nth(5)).toHaveText('—')
   await expect(risingRow.locator('td').nth(6)).toHaveText('+25.00%')
   await expect(risingRow.locator('td').nth(7)).toHaveText('+50.00%')
 }
@@ -158,6 +177,9 @@ async function expectFallingPriceHistoryValue(window: Page): Promise<void> {
   await expect(window.getByTestId('morning-auction-price-history-coverage')).toHaveText('历史涨跌 3日 2/2 · 5日 2/2')
   const fallingRow = window.locator('tbody tr').filter({ hasText: '历史样本乙' }).first()
   await expect(fallingRow).toBeVisible()
+  await expect(fallingRow.locator('td').nth(3)).toHaveText('14.25')
+  await expect(fallingRow.locator('td').nth(4)).toHaveText('-5.00%')
+  await expect(fallingRow.locator('td').nth(5)).toHaveText('—')
   await expect(fallingRow.locator('td').nth(6)).toHaveText('-16.67%')
   await expect(fallingRow.locator('td').nth(7)).toHaveText('-25.00%')
 
@@ -185,7 +207,7 @@ test('早盘竞价使用本地六日收盘完整展示三日和五日涨跌', as
 
     await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getSize() ?? []))
       .toEqual([1680, 960])
-    await openMorningAuction(window)
+    await openMorningAuction(window, '20260813')
     await expect(window.getByTestId('morning-auction-price-history-coverage')).toHaveText('历史涨跌 3日 1/1 · 5日 1/1')
     await expect(window.locator('tbody tr').filter({ hasText: '历史样本乙' })).toHaveCount(0)
 

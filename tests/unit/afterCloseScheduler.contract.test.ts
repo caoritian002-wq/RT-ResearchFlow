@@ -35,6 +35,11 @@ describe('18:00统一盘后调度契约', () => {
     )
     expect(startScheduler).toContain('} else {')
     expect(startScheduler.match(/runStartupAfterCloseCatchUp\(\)/g)).toHaveLength(2)
+    expect(startScheduler.match(/runStartupPublicHistoricalDailySyncIfNeeded\(/g)).toHaveLength(2)
+    expect(startScheduler).toContain('schedulePublicHistoricalDailyResumeCheck()')
+    expect(startScheduler.match(/schedulePublicHistoricalDailyResumeCheck\(\)/g)).toHaveLength(2)
+    expect(scheduler).toContain('_publicDailyResumeTimer = setInterval')
+    expect(scheduler).toContain('if (_publicDailyResumeTimer)')
 
     const marketTask = scheduler.slice(
       scheduler.indexOf('export async function runTopListSyncJob'),

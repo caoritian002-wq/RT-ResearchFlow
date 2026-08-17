@@ -55,7 +55,8 @@ test('盘后历史恢复样本明确披露来源、边界与一级行业覆盖',
       }))
     })
     await openIndustryHeatmap(window)
-    await expect(window.getByText('收盘前 3min 动量', { exact: true })).toBeVisible()
+    await expect(window.getByText('3min 动量', { exact: true })).toBeVisible()
+    await expect(window.getByTestId('industry-heatmap-momentum-state')).toHaveText('上个交易日收盘前回放')
     await expect(window.getByText('历史恢复 · 08-11 15:00', { exact: true })).toBeVisible()
     await expect(window.getByText('L1 31', { exact: true })).toBeVisible()
     await expect(window.getByText('+0.31%', { exact: true })).toBeVisible()
@@ -93,7 +94,8 @@ test('盘后动量按provider披露保留样本并跨重启恢复', async () => 
     })
 
     await openIndustryHeatmap(window)
-    await expect(window.getByText('收盘前 3min 动量', { exact: true })).toBeVisible()
+    await expect(window.getByText('3min 动量', { exact: true })).toBeVisible()
+    await expect(window.getByTestId('industry-heatmap-momentum-state')).toHaveText('上个交易日收盘前回放')
     await expect(window.getByText('保留样本 · 08-11 15:00', { exact: true })).toBeVisible()
     await expect(window.getByText('+0.42%', { exact: true })).toBeVisible()
     await expect(window.getByText('-0.29%', { exact: true })).toBeVisible()
@@ -103,10 +105,84 @@ test('盘后动量按provider披露保留样本并跨重启恢复', async () => 
     app = await launchApp(userDataDir)
     window = await openWindow(app)
     await openIndustryHeatmap(window)
-    await expect(window.getByText('收盘前 3min 动量', { exact: true })).toBeVisible()
+    await expect(window.getByText('3min 动量', { exact: true })).toBeVisible()
+    await expect(window.getByTestId('industry-heatmap-momentum-state')).toHaveText('上个交易日收盘前回放')
     await expect(window.getByText('保留样本 · 08-11 15:00', { exact: true })).toBeVisible()
   } finally {
     await app?.close().catch(() => undefined)
+    rmSync(userDataDir, { recursive: true, force: true })
+  }
+})
+
+test('行业云图浮层互斥且工具栏下拉可被窗口采集', async () => {
+  test.setTimeout(120_000)
+  const userDataDir = mkdtempSync(join(tmpdir(), 'trade-watch-heatmap-overlay-'))
+  const screenshotDir = join(process.cwd(), 'test-results')
+  mkdirSync(screenshotDir, { recursive: true })
+  const app = await launchApp(userDataDir)
+
+  try {
+    const window = await openWindow(app)
+    await openIndustryHeatmap(window)
+    const workbench = window.getByTestId('industry-heatmap-workbench')
+    await expect(workbench.locator('select')).toHaveCount(0)
+
+    const drawRuleTrigger = window.getByTestId('industry-heatmap-draw-rule-trigger')
+    await drawRuleTrigger.click()
+    const drawRuleListbox = window.getByTestId('industry-heatmap-draw-rule-listbox')
+    await expect(drawRuleListbox).toBeVisible()
+    const listboxGeometry = await drawRuleListbox.evaluate((node) => {
+      const rect = node.getBoundingClientRect()
+      return {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        position: getComputedStyle(node).position,
+      }
+    })
+    expect(listboxGeometry.position).toBe('absolute')
+    expect(listboxGeometry.left).toBeGreaterThanOrEqual(0)
+    expect(listboxGeometry.top).toBeGreaterThanOrEqual(0)
+    expect(listboxGeometry.right).toBeLessThanOrEqual(listboxGeometry.viewportWidth)
+    expect(listboxGeometry.bottom).toBeLessThanOrEqual(listboxGeometry.viewportHeight)
+    await window.screenshot({ path: join(screenshotDir, 'industry-heatmap-dom-dropdown.png') })
+
+    await window.getByTestId('industry-heatmap-draw-rule-option-absChange').click()
+    await expect(drawRuleTrigger).toContainText('涨跌幅强度')
+    await window.getByTestId('industry-heatmap-provider-trigger').click()
+    await expect(window.getByTestId('industry-heatmap-provider-listbox')).toBeVisible()
+    await window.keyboard.press('Escape')
+    await expect(window.getByTestId('industry-heatmap-provider-listbox')).toHaveCount(0)
+    await window.waitForTimeout(800)
+
+    const rankingItem = window.getByTestId('industry-heatmap-ranking-item').first()
+    await expect(rankingItem).toBeVisible({ timeout: 60_000 })
+    const chartRegion = window.getByTestId('industry-heatmap-chart-region')
+    const chartCanvas = chartRegion.locator('canvas:visible').first()
+    await expect(chartCanvas).toBeVisible()
+    const chartBox = await chartCanvas.boundingBox()
+    expect(chartBox).not.toBeNull()
+    if (!chartBox) throw new Error('INDUSTRY_HEATMAP_CHART_BOUNDS_UNAVAILABLE')
+    await window.mouse.move(
+      chartBox.x + chartBox.width * 0.4,
+      chartBox.y + chartBox.height * 0.4,
+    )
+    await window.mouse.move(
+      chartBox.x + chartBox.width * 0.5,
+      chartBox.y + chartBox.height * 0.5,
+    )
+    const treemapTooltip = window.locator('.industry-heatmap-treemap-tooltip:visible')
+    await expect(treemapTooltip).toHaveCount(1, { timeout: 10_000 })
+
+    await rankingItem.hover()
+    await expect(window.getByTestId('industry-heatmap-ranking-tooltip')).toBeVisible()
+    await expect(treemapTooltip).toHaveCount(0)
+    await window.screenshot({ path: join(screenshotDir, 'industry-heatmap-single-hover-overlay.png') })
+  } finally {
+    await app.close()
     rmSync(userDataDir, { recursive: true, force: true })
   }
 })

@@ -16,7 +16,8 @@ import {
   fetchIndexPrices,
   fetchStockBasic,
   fetchTradeCal,
-  fetchEastmoneyMinuteOHLCV
+  fetchEastmoneyMinuteOHLCV,
+  getTushareAccessErrorCode,
 } from './tushareService'
 import { upsertStockMinute, cleanupStockMinuteCache } from '../database/stockMinuteCacheRepository'
 import {
@@ -50,6 +51,7 @@ import {
   clearAllAndInsert as clearAndInsertStockBasic,
   isStockBasicCacheStale,
 } from '../database/stockBasicCacheRepository'
+import { replaceStockBasicIdentityProvenance } from '../database/publicMarketDataRepository'
 import { cleanupScreenerResults } from '../database/stockScreenerResultsRepository'
 import { getDataSourceConfig } from '../database/dataSourceRepository'
 import { decryptApiKey } from '../utils/apiKeyEncryption'
@@ -73,6 +75,9 @@ import { recomputeTrendScoresRealtime, computeAndSaveTrendScoresEOD, cleanupTren
 import { cleanupOldDecisionSignals, expireOldDecisionSignals } from './decisionSignalService'
 import { runPortfolioForecastJob } from './portfolioForecastService'
 import { HISTORICAL_DAILY_TARGET_TRADE_DAYS, runHistoricalDailySync } from './historicalDailySyncService'
+import { runPublicStockUniverseSync } from './publicStockUniverseService'
+import { runStartupPublicHistoricalDailySyncIfNeeded } from './publicHistoricalDailySyncService'
+import { runPublicDailySnapshotSync } from './publicDailySnapshotService'
 import { runStartupDailyCloseCatchUp } from './dailyCloseCatchUpService'
 import {
   beginAfterCloseSyncRun,
@@ -127,6 +132,7 @@ let _afterCloseDailyTimer: ReturnType<typeof setTimeout> | null = null
 let _conceptMembersTimer: ReturnType<typeof setTimeout> | null = null
 // FR-133/sharedRtKCache: 盘中每 60s 自动刷新全市场实时行情缓存
 let _rtKRefreshTimer: ReturnType<typeof setInterval> | null = null
+let _publicDailyResumeTimer: ReturnType<typeof setInterval> | null = null
 // FR-137: 早盘竞价定时自动触发（09:15 预热 + 09:28 刷新）
 let _morningAuction915Timer: ReturnType<typeof setTimeout> | null = null
 let _morningAuction928Timer: ReturnType<typeof setTimeout> | null = null
@@ -170,11 +176,18 @@ export function startScheduler(): void {
   scheduleClosingHalfHourFinalize()
   scheduleTradeCalSync()
   schedulePortfolioForecast()
-  void runStartupStockBasicSyncIfStale().catch((error) =>
-    console.warn('[StockBasicSync] startup catch-up failed:', error instanceof Error ? error.message : String(error))
-  )
   // 启动时立即拉一次交易日历，确保调休补班日判断正确
   const _token = getTushareTokenOrNull()
+  void runStartupStockBasicSyncIfStale()
+    .then(() => _token
+      ? null
+      : runStartupPublicHistoricalDailySyncIfNeeded(getDb(), getLastSettledCalendarDate()))
+    .catch((error) =>
+      console.warn('[StockBasicSync] startup catch-up failed:', error instanceof Error ? error.message : String(error))
+    )
+    .finally(() => {
+      if (!_token) schedulePublicHistoricalDailyResumeCheck()
+    })
   if (_token) {
     void refreshTradingCalendar(_token).catch((error) =>
       console.warn('[TradingCalendar] startup refresh failed:', error instanceof Error ? error.message : String(error))
@@ -183,9 +196,16 @@ export function startScheduler(): void {
       .then((result) => console.log(`[DailyCloseCatchUp] checked=${result.totalTradeDays} synced=${result.syncedTradeDays} failed=${result.failedTradeDays}`))
       .catch((error) => console.warn('[DailyCloseCatchUp] startup catch-up failed:', error instanceof Error ? error.message : String(error)))
       .finally(() => {
-        void runStartupAfterCloseCatchUp().catch((error) =>
-          console.warn('[AfterCloseSync] startup catch-up failed:', error instanceof Error ? error.message : String(error))
-        )
+        void runStartupPublicHistoricalDailySyncIfNeeded(getDb(), getLastSettledCalendarDate())
+          .catch((error) =>
+            console.warn('[PublicDailySync] startup resume failed:', error instanceof Error ? error.message : String(error))
+          )
+          .finally(() => {
+            schedulePublicHistoricalDailyResumeCheck()
+            void runStartupAfterCloseCatchUp().catch((error) =>
+              console.warn('[AfterCloseSync] startup catch-up failed:', error instanceof Error ? error.message : String(error))
+            )
+          })
       })
   } else {
     void runStartupAfterCloseCatchUp().catch((error) =>
@@ -219,6 +239,10 @@ export function stopScheduler(): void {
   if (_rtKRefreshTimer) {
     clearInterval(_rtKRefreshTimer)
     _rtKRefreshTimer = null
+  }
+  if (_publicDailyResumeTimer) {
+    clearInterval(_publicDailyResumeTimer)
+    _publicDailyResumeTimer = null
   }
   if (_morningAuction915Timer) {
     clearTimeout(_morningAuction915Timer)
@@ -257,6 +281,21 @@ export function reschedule(): void {
   _timer = null
   _nextScanAt = null
   scheduleNext()
+}
+
+function schedulePublicHistoricalDailyResumeCheck(): void {
+  if (_publicDailyResumeTimer) clearInterval(_publicDailyResumeTimer)
+  _publicDailyResumeTimer = setInterval(() => {
+    void runStartupPublicHistoricalDailySyncIfNeeded(getDb(), getLastSettledCalendarDate())
+      .then((result) => {
+        if (result) {
+          console.log(`[PublicDailySync] resumed from checkpoint, synced=${result.syncedStocks} failed=${result.failedStocks}`)
+        }
+      })
+      .catch((error) => {
+        console.warn('[PublicDailySync] checkpoint resume failed:', error instanceof Error ? error.message : String(error))
+      })
+  }, 60_000)
 }
 
 function scheduleNext(): void {
@@ -699,6 +738,7 @@ async function withCronRetry<T>(name: string, fn: () => Promise<T>): Promise<T |
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error(`[${name}] Attempt ${attempt + 1} failed: ${msg}`)
+      if (getTushareAccessErrorCode(err)) throw err
       if (attempt < delays.length - 1) {
         await new Promise((r) => setTimeout(r, delays[attempt]))
       }
@@ -794,21 +834,28 @@ export function runUnifiedAfterCloseSyncJob(
     const results: Array<{ taskKey: AfterCloseSyncTaskKey; status: AfterCloseSyncTaskStatus; message: string | null }> = []
     const token = getTushareTokenOrNull()
 
+    results.push(await runTrackedAfterCloseTask(tradeDate, 'security_master', async () => {
+      const synced = await runStockBasicSyncJob()
+      if (!synced) throw new Error('STOCK_BASIC_SYNC_INCOMPLETE')
+      const message = `来源 ${synced.source}，证券 ${synced.rowCount}，恢复候选 ${synced.remappedCandidates}，登记公司 ${synced.materializedProjectCompanies}`
+      return synced.remapError
+        ? { status: 'partial', message: `${message}；候选重映射失败：${synced.remapError}` }
+        : { message }
+    }))
+
     if (!token) {
       const message = 'TUSHARE_DISABLED'
-      results.push(markAfterCloseTaskBlocked(tradeDate, 'security_master', message))
       results.push(markAfterCloseTaskBlocked(tradeDate, 'short_term_daily', message))
-      results.push(markAfterCloseTaskBlocked(tradeDate, 'market_daily', message))
+      results.push(await runTrackedAfterCloseTask(tradeDate, 'market_daily', async () => {
+        const snapshot = await runPublicDailySnapshotSync(db, tradeDate)
+        await syncWatchlistToStockPriceCache(snapshot.dailyRows, tradeDate)
+        return {
+          status: 'partial',
+          message: `公共盘后截面 ${snapshot.writtenRows} 条；龙虎榜等Tushare增强数据未同步`,
+        }
+      }))
       results.push(markAfterCloseTaskBlocked(tradeDate, 'chip_structure', message))
     } else {
-      results.push(await runTrackedAfterCloseTask(tradeDate, 'security_master', async () => {
-        const synced = await runStockBasicSyncJob()
-        if (!synced) throw new Error('STOCK_BASIC_SYNC_INCOMPLETE')
-        const message = `证券 ${synced.rowCount}，恢复候选 ${synced.remappedCandidates}，登记公司 ${synced.materializedProjectCompanies}`
-        return synced.remapError
-          ? { status: 'partial', message: `${message}；候选重映射失败：${synced.remapError}` }
-          : { message }
-      }))
       results.push(await runTrackedAfterCloseTask(tradeDate, 'short_term_daily', async () => {
         const completed = await runAfterCloseDailySyncJob(tradeDate)
         if (!completed) throw new Error('SHORT_TERM_DAILY_INCOMPLETE')
@@ -1019,7 +1066,12 @@ export async function runDailyOHLCVSyncJob(tradeDate: string): Promise<boolean> 
       console.warn('[DailyOHLCVSync] daily_basic merge failed:', err instanceof Error ? err.message : String(err))
     }
 
-    upsertDailyClose(getDb(), mergedRows)
+    upsertDailyClose(getDb(), mergedRows, {
+      dataSource: 'tushare',
+      amountSource: 'tushare',
+      turnoverSource: 'tushare',
+      fetchedAt: Date.now(),
+    })
     console.log(`[DailyOHLCVSync] ${tradeDate} upserted ${mergedRows.length} rows`)
 
     // 方案 A：同步自选股到 stock_price_cache，填补每日空缺交易日
@@ -1221,6 +1273,7 @@ export async function runConceptMembersSyncForSource(source: string): Promise<vo
  * 独立同步证券主数据。身份数据以 stock_basic 为准，daily_basic 股本补充失败不阻断新股入库。
  */
 export interface StockBasicSyncResult {
+  source: 'tushare' | 'sina'
   rowCount: number
   filledCircFloat: number
   latestOpenTradeDate: string | null
@@ -1232,51 +1285,66 @@ export interface StockBasicSyncResult {
 export function runStockBasicSyncJob(): Promise<StockBasicSyncResult | null> {
   if (_stockBasicSyncPromise) return _stockBasicSyncPromise
   const token = getTushareTokenOrNull()
-  if (!token) {
-    console.warn('[StockBasicSync] Tushare 未配置，跳过同步')
-    return Promise.resolve(null)
-  }
 
   let promise: Promise<StockBasicSyncResult | null>
   promise = (async () => {
-    const synced = await withCronRetry('StockBasicSync', async () => {
-      const basicRows = await fetchStockBasic(token)
-      if (basicRows.length === 0) throw new Error('STOCK_BASIC_EMPTY')
-
-      const today = getBjTodayYmd()
-      let latestOpenTradeDate: string | null = null
-      const floatShareMap = new Map<string, number | null>()
+    let synced: Pick<StockBasicSyncResult, 'source' | 'rowCount' | 'filledCircFloat' | 'latestOpenTradeDate'> | null = null
+    if (token) {
       try {
-        const startDate = offsetBjDateYmd(today, -14)
-        const calRows = await fetchTradeCal(token, 'SSE', startDate, today)
-        latestOpenTradeDate = calRows
-          .filter((row) => row.isOpen === 1)
-          .map((row) => row.calDate)
-          .sort((left, right) => right.localeCompare(left))[0] ?? null
-        if (latestOpenTradeDate) {
-          const dailyBasicRows = await fetchDailyBasicByDate(token, latestOpenTradeDate)
-          for (const row of dailyBasicRows) floatShareMap.set(row.tsCode, row.floatShare)
-        }
-      } catch (error) {
-        console.warn('[StockBasicSync] optional circ_float fill failed:', error instanceof Error ? error.message : String(error))
-      }
+        synced = await withCronRetry('StockBasicSync', async () => {
+          const basicRows = await fetchStockBasic(token)
+          if (basicRows.length === 0) throw new Error('STOCK_BASIC_EMPTY')
 
-      const now = Date.now()
-      const cacheRows = basicRows.map(r => ({
-        tsCode: r.tsCode,
-        name: r.name,
-        industry: r.industry,
-        market: r.market,
-        listStatus: r.listStatus,
-        circFloat: floatShareMap.get(r.tsCode) ?? null,
-        updatedAt: now,
-      }))
-      clearAndInsertStockBasic(getDb(), cacheRows)
-      const filledCircFloat = cacheRows.filter(r => r.circFloat != null).length
-      console.log(`[StockBasicSync] stock_basic_cache fully replaced with ${basicRows.length} rows, circ_float filled ${filledCircFloat}/${cacheRows.length}, latestOpenTradeDate=${latestOpenTradeDate ?? 'unavailable'}`)
-      return { rowCount: basicRows.length, filledCircFloat, latestOpenTradeDate }
-    })
-    if (!synced) throw new Error('STOCK_BASIC_SYNC_FAILED')
+          const today = getBjTodayYmd()
+          let latestOpenTradeDate: string | null = null
+          const floatShareMap = new Map<string, number | null>()
+          try {
+            const startDate = offsetBjDateYmd(today, -14)
+            const calRows = await fetchTradeCal(token, 'SSE', startDate, today)
+            latestOpenTradeDate = calRows
+              .filter((row) => row.isOpen === 1)
+              .map((row) => row.calDate)
+              .sort((left, right) => right.localeCompare(left))[0] ?? null
+            if (latestOpenTradeDate) {
+              const dailyBasicRows = await fetchDailyBasicByDate(token, latestOpenTradeDate)
+              for (const row of dailyBasicRows) floatShareMap.set(row.tsCode, row.floatShare)
+            }
+          } catch (error) {
+            console.warn('[StockBasicSync] optional circ_float fill failed:', error instanceof Error ? error.message : String(error))
+          }
+
+          const observedAt = Date.now()
+          const cacheRows = basicRows.map(r => ({
+            tsCode: r.tsCode,
+            name: r.name,
+            industry: r.industry,
+            market: r.market,
+            listStatus: r.listStatus,
+            circFloat: floatShareMap.get(r.tsCode) ?? null,
+            updatedAt: observedAt,
+          }))
+          const db = getDb()
+          clearAndInsertStockBasic(db, cacheRows)
+          replaceStockBasicIdentityProvenance(db, cacheRows.map((row) => row.tsCode), 'tushare', observedAt)
+          const filledCircFloat = cacheRows.filter(r => r.circFloat != null).length
+          console.log(`[StockBasicSync] stock_basic_cache fully replaced with ${basicRows.length} Tushare rows, circ_float filled ${filledCircFloat}/${cacheRows.length}, latestOpenTradeDate=${latestOpenTradeDate ?? 'unavailable'}`)
+          return { source: 'tushare' as const, rowCount: basicRows.length, filledCircFloat, latestOpenTradeDate }
+        })
+      } catch (error) {
+        console.warn('[StockBasicSync] Tushare path unavailable, falling back to conservative public sync:', error instanceof Error ? error.message : String(error))
+      }
+    }
+
+    if (!synced) {
+      const publicResult = await runPublicStockUniverseSync(getDb())
+      synced = {
+        source: 'sina',
+        rowCount: publicResult.totalRows,
+        filledCircFloat: publicResult.preservedCircFloatRows,
+        latestOpenTradeDate: null,
+      }
+      console.log(`[StockBasicSync] public stock identities merged ${publicResult.totalRows} rows, inserted=${publicResult.insertedRows}, preservedCircFloat=${publicResult.preservedCircFloatRows}`)
+    }
 
     let remappedCandidates = 0
     let materializedProjectCompanies = 0

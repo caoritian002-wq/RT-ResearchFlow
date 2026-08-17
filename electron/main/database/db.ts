@@ -4575,6 +4575,74 @@ const MIGRATIONS: DatabaseMigration[] = [
       CREATE INDEX idx_market_resonance_snapshots_captured
         ON market_resonance_daily_snapshots(captured_at DESC);
     `
+  },
+  {
+    // FR-273: persistent public-market throttling, provenance and resumable daily backfill.
+    version: 137,
+    sql: `
+      ALTER TABLE daily_close_cache ADD COLUMN amount REAL;
+      ALTER TABLE daily_close_cache ADD COLUMN data_source TEXT NOT NULL DEFAULT 'legacy';
+      ALTER TABLE daily_close_cache ADD COLUMN amount_source TEXT;
+      ALTER TABLE daily_close_cache ADD COLUMN turnover_source TEXT;
+      ALTER TABLE daily_close_cache ADD COLUMN fetched_at INTEGER;
+
+      CREATE TABLE public_market_request_global_state (
+        id                    INTEGER PRIMARY KEY CHECK (id = 1),
+        total_requests        INTEGER NOT NULL DEFAULT 0 CHECK (total_requests >= 0),
+        requests_in_batch     INTEGER NOT NULL DEFAULT 0 CHECK (requests_in_batch >= 0),
+        next_allowed_at       INTEGER NOT NULL DEFAULT 0 CHECK (next_allowed_at >= 0),
+        batch_blocked_until   INTEGER NOT NULL DEFAULT 0 CHECK (batch_blocked_until >= 0),
+        updated_at            INTEGER NOT NULL CHECK (updated_at > 0)
+      );
+      INSERT INTO public_market_request_global_state (id, updated_at) VALUES (1, unixepoch('subsec') * 1000);
+
+      CREATE TABLE public_market_provider_states (
+        provider              TEXT PRIMARY KEY,
+        request_count         INTEGER NOT NULL DEFAULT 0 CHECK (request_count >= 0),
+        success_count         INTEGER NOT NULL DEFAULT 0 CHECK (success_count >= 0),
+        failure_count         INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
+        rate_limit_count      INTEGER NOT NULL DEFAULT 0 CHECK (rate_limit_count >= 0),
+        consecutive_failures  INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+        blocked_until         INTEGER NOT NULL DEFAULT 0 CHECK (blocked_until >= 0),
+        block_reason          TEXT,
+        last_status           INTEGER,
+        last_request_at       INTEGER,
+        updated_at            INTEGER NOT NULL CHECK (updated_at > 0)
+      );
+
+      CREATE TABLE public_market_sync_jobs (
+        job_key          TEXT PRIMARY KEY,
+        status           TEXT NOT NULL CHECK (status IN ('idle', 'running', 'success', 'partial', 'failed', 'cooldown')),
+        total_items      INTEGER NOT NULL DEFAULT 0 CHECK (total_items >= 0),
+        processed_items  INTEGER NOT NULL DEFAULT 0 CHECK (processed_items >= 0),
+        written_rows     INTEGER NOT NULL DEFAULT 0 CHECK (written_rows >= 0),
+        current_item     TEXT,
+        message          TEXT,
+        started_at       INTEGER,
+        completed_at     INTEGER,
+        updated_at       INTEGER NOT NULL CHECK (updated_at > 0)
+      );
+
+      CREATE TABLE stock_basic_identity_provenance (
+        ts_code      TEXT PRIMARY KEY,
+        data_source  TEXT NOT NULL CHECK (data_source IN ('legacy', 'tushare', 'sina')),
+        observed_at  INTEGER NOT NULL CHECK (observed_at > 0)
+      );
+
+      CREATE TABLE public_daily_sync_checkpoints (
+        ts_code           TEXT PRIMARY KEY,
+        primary_provider  TEXT NOT NULL CHECK (primary_provider IN ('sina', 'tencent')),
+        status            TEXT NOT NULL CHECK (status IN ('pending', 'running', 'success', 'partial', 'failed', 'cooldown')),
+        target_end_date   TEXT NOT NULL CHECK (length(target_end_date) = 8),
+        last_success_date TEXT CHECK (last_success_date IS NULL OR length(last_success_date) = 8),
+        written_rows      INTEGER NOT NULL DEFAULT 0 CHECK (written_rows >= 0),
+        last_error        TEXT,
+        attempts          INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        updated_at        INTEGER NOT NULL CHECK (updated_at > 0)
+      );
+      CREATE INDEX idx_public_daily_checkpoint_status
+        ON public_daily_sync_checkpoints(status, updated_at);
+    `
   }
 ]
 

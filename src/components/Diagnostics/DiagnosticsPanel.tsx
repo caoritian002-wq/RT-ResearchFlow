@@ -601,7 +601,11 @@ export function DiagnosticsPanel({ onNavigateConfig, onOpenGuide, initialization
         {initializationFlow && (
           <div data-testid="diagnostics-initialization-flow" className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-200">
             <div className="font-semibold">初始化任务</div>
-            <div className="mt-1 text-xs opacity-80">{flowProgress?.done ?? 0}/{flowProgress?.total ?? 0} 完成 · {initializationFlow.running ? '正在执行' : initializationFlow.error ? '需要处理' : '空闲'}</div>
+            <div className="mt-1 text-xs opacity-80">
+              {flowProgress?.done ?? 0}/{flowProgress?.total ?? 0} 完成
+              {(flowProgress?.deferred ?? 0) > 0 ? ` · ${flowProgress?.deferred} 项稍后同步` : ''}
+              {' · '}{initializationFlow.running ? '正在执行' : initializationFlow.error ? '需要处理' : '空闲'}
+            </div>
             {(initializationFlow.message || initializationFlow.error) && <div className="mt-2 text-xs">{initializationFlow.error ?? initializationFlow.message}</div>}
           </div>
         )}

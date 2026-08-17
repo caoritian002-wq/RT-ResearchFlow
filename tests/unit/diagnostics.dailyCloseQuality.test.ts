@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { DATABASE_MIGRATIONS, runMigrations } from '../../electron/main/database/db'
 
 vi.mock('../../electron/main/database/dataSourceRepository', () => ({
   getDataSourceConfig: () => ({ tushareEnabled: false, tushareTokenEncrypted: null }),
@@ -130,6 +131,36 @@ describe('diagnostics dailyCloseQuality', () => {
         remainingTradeDays: 520,
         message: null,
       },
+    })
+    const syncItems = snapshot.groups.find((group) => group.key === 'sync')?.items ?? []
+    expect(syncItems.find((item) => item.key === 'sync.stockBasic')?.message).toContain('通常约1分钟')
+    expect(syncItems.find((item) => item.key === 'sync.historicalDaily')?.message).toContain('通常约2小时')
+    db.close()
+  })
+
+  it('向诊断界面披露公共后台任务的分页进度和冷却状态', () => {
+    const db = createDiagnosticsDb()
+    runMigrations(db, DATABASE_MIGRATIONS.filter((migration) => migration.version === 137))
+    db.prepare(`
+      INSERT INTO public_market_sync_jobs (
+        job_key, status, total_items, processed_items, written_rows,
+        current_item, message, started_at, completed_at, updated_at
+      ) VALUES
+        ('stock_universe', 'running', 80, 12, 1200, '第 13 页', NULL, 1000, NULL, 2000),
+        ('historical_daily_public', 'cooldown', 5500, 321, 128000, NULL,
+         '公共历史日线已暂停，数据源冷却至 2026/8/17 14:30:00', 1000, 2000, 2000)
+    `).run()
+
+    const syncItems = getDiagnosticsHealth(db).groups
+      .find((group) => group.key === 'sync')
+      ?.items ?? []
+    expect(syncItems.find((item) => item.key === 'sync.stockBasic')).toMatchObject({
+      status: 'ok',
+      message: '公共证券列表后台同步中：12/80 页',
+    })
+    expect(syncItems.find((item) => item.key === 'sync.historicalDaily')).toMatchObject({
+      status: 'warning',
+      message: '公共历史日线已暂停，数据源冷却至 2026/8/17 14:30:00',
     })
     db.close()
   })

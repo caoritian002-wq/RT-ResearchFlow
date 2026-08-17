@@ -21,7 +21,7 @@ import { getDataSourceConfig } from '../database/dataSourceRepository'
 import { decryptApiKey } from '../utils/apiKeyEncryption'
 import { fetchStkAuction, fetchDailyForCandidates, fetchKplConceptConsByStock } from './tushareService'
 import { getRtKCache, refreshRtKCache, getLimitPct } from './sharedRtKCache'
-import { queryDailyClose, upsertDailyClose } from '../database/dailyCloseCacheRepository'
+import { queryDailyClose, queryDailyCloseExact, upsertDailyClose } from '../database/dailyCloseCacheRepository'
 import { queryByDate as queryStkAuctionByDate, upsertStkAuctionCache } from '../database/stkAuctionCacheRepository'
 import { getKplListByDate } from '../database/kplConceptDailyRepository'
 import {
@@ -46,6 +46,12 @@ import {
   type MorningAuctionPriceHistoryCoverage,
   type MorningAuctionPriceHistoryEntry,
 } from './morningAuctionPriceHistoryCoordinator'
+import { getBeijingYmd } from './marketSettlementPolicy'
+import {
+  applyMorningAuctionCloseProjection,
+  isCurrentMorningAuctionTradeDate,
+  type MorningAuctionCloseFact,
+} from './morningAuctionPriceProjection'
 
 export interface MorningAuctionStock {
   /** Tushare 风格代码: 000001.SZ / 600519.SH / 300750.SZ */
@@ -64,11 +70,12 @@ export interface MorningAuctionStock {
   /** 集合竞价换手率（%），来自 369 stk_auction turnover_rate 字段 */
   auctionTurnover: number
   /** 集合竞价成交量比（vs 前 5 日均量），可空 */
-  volumeRatio: number | null  /** 当前最新价（元），来自 sharedRtKCache；数据不可用时为 null */
+  volumeRatio: number | null
+  /** 当前交易日为实时价；历史交易日为目标日收盘价；数据不可用时为 null。 */
   currentPrice: number | null
-  /** 当前涨跌幅（%），来自 sharedRtKCache；数据不可用时为 null */
+  /** 当前交易日为实时涨跌幅；历史交易日为目标日收盘涨跌幅；数据不可用时为 null。 */
   currentPctChg: number | null
-  /** 当日累计成交额（元），来自 sharedRtKCache；数据不可用时为 null */
+  /** 当前交易日累计成交额（元）；历史日线缓存没有精确成交额时为 null。 */
   currentAmount: number | null
   /** 近 3 个交易日累计涨跌幅（%）；样本不足或读取失败时为 null */
   pctChg3d: number | null
@@ -765,36 +772,28 @@ async function mergePriceHistory(
 }
 
 /**
- * rt_k 盘中实时缓存可用时，后续调用的 mergeCurrentPrices 会覆盖此处的值。
+ * 把目标交易日收盘事实投影到全部竞价候选。daily_close_cache覆盖全市场，
+ * limit_list_daily只作为旧缓存缺失时的保真兜底。
  */
-function mergeTodayClose(snap: MorningAuctionSnapshot, tradeDate: string): void {
+function mergeTradeDateClose(
+  snap: MorningAuctionSnapshot,
+  tradeDate: string,
+  options: { replaceExisting: boolean },
+): void {
   const db = getDb()
-  const todayRows = getLimitListByDate(db, tradeDate)
-  if (todayRows.length === 0) return
-  const closeMap = new Map<string, { close: number | null; pctChg: number | null }>()
-  for (const r of todayRows) {
+  const stocks = getSnapshotPools(snap).flat()
+  const tsCodes = [...new Set(stocks.map(stock => stock.tsCode))]
+  if (tsCodes.length === 0) return
+  const closeMap = new Map<string, MorningAuctionCloseFact>()
+  for (const r of getLimitListByDate(db, tradeDate)) {
     closeMap.set(r.tsCode, { close: r.close, pctChg: r.pctChg })
   }
-  const pools: MorningAuctionStock[][] = [
-    snap.threeOne.firstBoard, snap.threeOne.secondBoard,
-    snap.threeOne.brokenBoard, snap.threeOne.brokenConsec,
-    snap.threeOne.allMarket,
-    snap.weakToStrong.badBoard, snap.weakToStrong.tailAttack,
-    snap.weakToStrong.brokenBoard, snap.weakToStrong.afternoonReseal,
-    snap.weakToStrong.reversal,
-    snap.boardCategory.first, snap.boardCategory.second,
-    snap.boardCategory.third, snap.boardCategory.n
-  ]
-  for (const pool of pools) {
-    for (const s of pool) {
-      if (s.currentPrice != null) continue  // 已有数据不覆盖
-      const entry = closeMap.get(s.tsCode)
-      if (entry?.close != null) {
-        s.currentPrice = entry.close
-        s.currentPctChg = entry.pctChg ?? null
-      }
-    }
+  for (const [tsCode, rows] of queryDailyCloseExact(db, tsCodes, tradeDate)) {
+    const row = rows[0]
+    if (!row) continue
+    closeMap.set(tsCode, { close: row.close, pctChg: row.pctChg })
   }
+  applyMorningAuctionCloseProjection(stocks, closeMap, options)
 }
 
 /**
@@ -919,8 +918,9 @@ export async function getOrCreateMorningAuctionSnapshot(tradeDate: string): Prom
   if (!cachedSnapshot || cachedSnapshot.tradeDate !== tradeDate) {
     cachedSnapshot = await buildRealMorningAuctionSnapshot(tradeDate)
   }
-  mergeTodayClose(cachedSnapshot, tradeDate)   // 盘后收盘价 fallback
-  mergeCurrentPrices(cachedSnapshot)           // 盘中 rt_k 实时覆盖
+  const currentTradeDate = isCurrentMorningAuctionTradeDate(tradeDate, getBeijingYmd())
+  mergeTradeDateClose(cachedSnapshot, tradeDate, { replaceExisting: !currentTradeDate })
+  if (currentTradeDate) mergeCurrentPrices(cachedSnapshot)
   // FR-134: 填充 3d/5d 数据
   // DB 全命中时 mergePriceHistory 仅做 SQLite 查询（< 5ms），await 对用户无感知；
   // 仅当候选股为新股/首次使用时才会触发 Tushare API 补拉（~1s），比原来「5s 后二次刷新」快得多。
@@ -946,8 +946,9 @@ export async function refreshMorningAuctionSnapshot(tradeDate: string): Promise<
   // buildRealMorningAuctionSnapshot 会先装载 stk_auction_cache；远端为空或失败时不会抹掉本地快照。
   cachedSnapshot = await buildRealMorningAuctionSnapshot(tradeDate)
   _conceptCache = null  // 强制重新拉取题材
-  mergeTodayClose(cachedSnapshot, tradeDate)
-  mergeCurrentPrices(cachedSnapshot)
+  const currentTradeDate = isCurrentMorningAuctionTradeDate(tradeDate, getBeijingYmd())
+  mergeTradeDateClose(cachedSnapshot, tradeDate, { replaceExisting: !currentTradeDate })
+  if (currentTradeDate) mergeCurrentPrices(cachedSnapshot)
   // FR-134: 填充 3d/5d 数据后再返回，避免刷新后表格长期显示横线
   await mergePriceHistory(cachedSnapshot, tradeDate, { retryUnresolved: true })
   applyThemeAttributionToSnapshot(cachedSnapshot)

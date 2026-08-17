@@ -22,6 +22,7 @@ import { buildOnboardingModel, type DiagnosticsHealthSnapshot } from './componen
 import { buildInitializationModel } from './components/Onboarding/initializationModel'
 import {
   createInitialFlowState,
+  getQuickStartDeferral,
   INITIALIZATION_TASKS,
   shouldSkipInitializationTask,
   type InitializationFlowState,
@@ -487,20 +488,33 @@ export default function App() {
     }))
 
     let latestSnapshot = onboardingSnapshot
+    const pendingTaskKeys = new Set<InitializationTaskKey>()
     for (const task of queue) {
-      if (task.key !== 'refresh-before' && task.key !== 'refresh-after') {
-        const datasourceReady = latestSnapshot?.groups.flatMap(group => group.items).find(item => item.key === 'config.tushare')?.status === 'ok'
-        if (!datasourceReady) {
-          updateInitializationTask(task.key, { status: 'retryable', endedAt: Date.now(), error: 'Tushare 未配置或不可用, 请先打开数据源配置。' })
-          setInitializationFlow(prev => ({ ...prev, running: false, endedAt: Date.now(), currentTaskKey: undefined, error: 'Tushare 未配置或不可用, 初始化已暂停。' }))
-          return
-        }
-      }
-
       const skipReason = shouldSkipInitializationTask(latestSnapshot, task)
       if (skipReason) {
         updateInitializationTask(task.key, { status: 'skipped', message: skipReason, startedAt: Date.now(), endedAt: Date.now() })
         continue
+      }
+
+      const deferredReason = getQuickStartDeferral(task, Boolean(onlyTaskKey))
+      if (deferredReason) {
+        pendingTaskKeys.add(task.key)
+        updateInitializationTask(task.key, { status: 'deferred', message: deferredReason, startedAt: Date.now(), endedAt: Date.now() })
+        continue
+      }
+
+      if (task.requiresTushare) {
+        const datasourceReady = latestSnapshot?.groups.flatMap(group => group.items).find(item => item.key === 'config.tushare')?.status === 'ok'
+        if (!datasourceReady) {
+          const message = 'Tushare 未配置或不可用；该增强任务可稍后重试，不影响资讯和六位代码直查等本地优先能力。'
+          pendingTaskKeys.add(task.key)
+          updateInitializationTask(task.key, { status: 'retryable', startedAt: Date.now(), endedAt: Date.now(), error: message })
+          if (task.failurePolicy === 'stop') {
+            setInitializationFlow(prev => ({ ...prev, running: false, endedAt: Date.now(), currentTaskKey: undefined, error: message }))
+            return
+          }
+          continue
+        }
       }
 
       const taskStartedAt = Date.now()
@@ -510,10 +524,24 @@ export default function App() {
       try {
         const res = await window.api.diagnostics.runCheck(task.action)
         if (!res.ok) {
-          updateInitializationTask(task.key, { status: 'retryable', endedAt: Date.now(), error: res.message || '任务执行失败' })
-          setInitializationFlow(prev => ({ ...prev, running: false, endedAt: Date.now(), currentTaskKey: undefined, error: res.message || `${task.title} 执行失败` }))
-          await loadOnboardingHealth()
-          return
+          const message = res.message || '任务执行失败'
+          pendingTaskKeys.add(task.key)
+          updateInitializationTask(task.key, { status: 'retryable', endedAt: Date.now(), error: message })
+          if (task.failurePolicy === 'stop') {
+            setInitializationFlow(prev => ({ ...prev, running: false, endedAt: Date.now(), currentTaskKey: undefined, error: message }))
+            await loadOnboardingHealth()
+            return
+          }
+          continue
+        }
+        if (res.data.status === 'started') {
+          pendingTaskKeys.add(task.key)
+          updateInitializationTask(task.key, {
+            status: 'deferred',
+            endedAt: Date.now(),
+            message: res.data.message,
+          })
+          continue
         }
         updateInitializationTask(task.key, { status: 'success', endedAt: Date.now(), message: res.data.message })
         if (task.action === 'refreshHealth') {
@@ -525,16 +553,26 @@ export default function App() {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : `${task.title} 执行失败`
+        pendingTaskKeys.add(task.key)
         updateInitializationTask(task.key, { status: 'retryable', endedAt: Date.now(), error: message })
-        setInitializationFlow(prev => ({ ...prev, running: false, endedAt: Date.now(), currentTaskKey: undefined, error: message }))
-        await loadOnboardingHealth()
-        return
+        if (task.failurePolicy === 'stop') {
+          setInitializationFlow(prev => ({ ...prev, running: false, endedAt: Date.now(), currentTaskKey: undefined, error: message }))
+          await loadOnboardingHealth()
+          return
+        }
       }
     }
 
     await loadOnboardingHealth()
     await loadDecisionSignalSummary()
-    setInitializationFlow(prev => ({ ...prev, running: false, endedAt: Date.now(), currentTaskKey: undefined, message: '初始化任务已完成。', error: undefined }))
+    const finalMessage = pendingTaskKeys.size > 0
+      ? onlyTaskKey
+        ? `${queue[0]?.title ?? '该任务'}仍待处理，可稍后重试；基础入口不受阻塞。`
+        : `基础入口已开放，${pendingTaskKeys.size} 项数据增强任务待处理。`
+      : onlyTaskKey
+        ? `${queue[0]?.title ?? '该任务'}已完成。`
+        : '初始化任务已完成。'
+    setInitializationFlow(prev => ({ ...prev, running: false, endedAt: Date.now(), currentTaskKey: undefined, message: finalMessage, error: undefined }))
   }
 
   function startInitializationFlow() {
